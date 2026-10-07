@@ -1,0 +1,87 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg://noteloop:noteloop@db:5432/noteloop
+  REDIS_URL: redis://redis:6379/0
+  TEMPORAL_ADDRESS: temporal:7233
+  LLM_PROVIDER: ollama
+  LLM_MODEL: llama3.2
+  OLLAMA_HOST: http://host.docker.internal:11434
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: noteloop
+      POSTGRES_PASSWORD: noteloop
+      POSTGRES_DB: noteloop
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noteloop"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  temporal:
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    ports:
+      - "7233:7233"
+      - "8233:8233" # Temporal web UI
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment: *backend-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+
+  web:
+    build: ./web
+    environment:
+      API_URL: http://api:8000
+      # File watching is unreliable on bind mounts for Docker Desktop on Mac and Windows.
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web:/app
+      # Keep the container's installed packages and build cache out of the bind mount.
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - api
+      - temporal
+
+volumes:
+  pgdata:
