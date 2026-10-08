@@ -11,6 +11,22 @@ An AI assisted progress note tool for therapists. The AI drafts a SOAP note from
 5. Signing locks the note, writes an audit event, and starts a Temporal workflow that creates a claim and submits it to a simulated payer, with retries.
 6. A batch workflow can resubmit every failed claim in chunks, at a controlled rate.
 
+## Screenshots
+
+Click any image to open it full size.
+<table>
+  <tr>
+    <td><a href="images/ai_draft_3.png"><img src="images/dashboard_1.jpg" width="280" alt="dashboard"></a></td>
+    <td><a href="images/draft_2.png"><img src="images/draft_2.png" width="280" alt="draft"></a></td>
+    <td><a href="images/ai_draft_3.png"><img src="images/ai_draft_3.png" width="280" alt="ai draft"></a></td>
+  </tr>
+  <tr>
+    <td><a href="images/signing_4.png"><img src="images/signing_4.png" width="280" alt="signing"></a></td>
+    <td><a href="images/claim_submit_5.png"><img src="images/claim_submit_5.png" width="280" alt="claim submit"></a></td>
+    <td><a href="images/temporal_6.png"><img src="images/temporal_6.png" width="280" alt="temporal"></a></td>
+  </tr>
+</table>
+
 ## System design
 
 ```mermaid
