@@ -16,7 +16,7 @@ An AI assisted progress note tool for therapists. The AI drafts a SOAP note from
 Click any image to open it full size.
 <table>
   <tr>
-    <td><a href="images/dashboard_1.png"><img src="images/dashboard_1.jpg" width="280" alt="dashboard"></a></td>
+    <td><a href="images/dashboard_1.png"><img src="images/dashboard_1.png" width="280" alt="dashboard"></a></td>
     <td><a href="images/draft_2.png"><img src="images/draft_2.png" width="280" alt="draft"></a></td>
     <td><a href="images/ai_draft_3.png"><img src="images/ai_draft_3.png" width="280" alt="ai draft"></a></td>
   </tr>
