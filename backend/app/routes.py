@@ -17,10 +17,15 @@ from .redis_client import get_redis_client
 from .schemas import (
     AuditOut,
     ClaimOut,
+    ClaimSummary,
     DraftRequest,
     NoteOut,
     NoteUpdate,
+    ResubmitOut,
+    ResubmitRequest,
     SessionOut,
+    SuggestionsOut,
+    SuggestRequest,
 )
 from .services import notes as svc
 from .workflows.starter import NoopStarter, TemporalStarter, WorkflowStarter
@@ -49,6 +54,20 @@ def limit_drafts(
             r,
             f"draft:{session.therapist_id}",
             get_settings().draft_rate_limit_per_minute,
+        )
+
+
+def limit_suggestions(
+    session_id: int,
+    db: Session = Depends(get_db),
+    r: Redis = Depends(get_redis_client),
+) -> None:
+    session = db.get(TherapySession, session_id)
+    if session is not None:
+        check_rate_limit(
+            r,
+            f"suggest:{session.therapist_id}",
+            get_settings().suggest_rate_limit_per_minute,
         )
 
 
@@ -101,8 +120,27 @@ def get_note(session_id: int, db: Session = Depends(get_db)):
 
 @router.put("/sessions/{session_id}/note", response_model=NoteOut)
 def update_note(session_id: int, body: NoteUpdate, db: Session = Depends(get_db)):
-    note = svc.update_final_note(db, session_id, body.final_note)
+    note = svc.update_final_note(
+        db, session_id, body.final_note, list(body.ai_assisted_sections)
+    )
     return svc.note_to_out(note)
+
+
+@router.post(
+    "/sessions/{session_id}/note/suggest",
+    response_model=SuggestionsOut,
+    dependencies=[Depends(limit_suggestions)],
+)
+def suggest_note_wording(
+    session_id: int,
+    body: SuggestRequest,
+    db: Session = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+):
+    """Suggest more formal wording for the given sections. Saves nothing."""
+    return SuggestionsOut(
+        suggestions=svc.suggest_wording(db, session_id, body.note, body.sections, provider)
+    )
 
 
 @router.post("/sessions/{session_id}/note/sign", response_model=NoteOut)
@@ -133,6 +171,25 @@ def get_claim(session_id: int, db: Session = Depends(get_db)):
         payer_reference=claim.payer_reference,
         submitted_at=claim.submitted_at,
     )
+
+
+@router.get("/claims/summary", response_model=ClaimSummary)
+def claims_summary(db: Session = Depends(get_db)):
+    return svc.claim_summary(db)
+
+
+@router.post("/claims/resubmit-failed", response_model=ResubmitOut, status_code=202)
+async def resubmit_failed_claims(
+    body: ResubmitRequest | None = None,
+    starter: WorkflowStarter = Depends(get_workflow_starter),
+):
+    """Start a batch workflow that retries every failed claim, a chunk at a time.
+
+    Returns right away. Watch progress in the Temporal UI or with /claims/summary.
+    """
+    chunk_size = (body.chunk_size if body else None) or get_settings().resubmit_chunk_size
+    workflow_id = await starter.start_resubmit_failed(chunk_size)
+    return ResubmitOut(workflow_id=workflow_id, chunk_size=chunk_size)
 
 
 @router.get("/sessions/{session_id}/note/audit", response_model=list[AuditOut])

@@ -1,12 +1,17 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
 from .db import Base, SessionLocal, engine
-from .errors import ConflictError, LLMOutputError, NotFoundError, RateLimitedError
+from .errors import (
+    ConflictError,
+    LLMOutputError,
+    NotFoundError,
+    RateLimitedError,
+    UnavailableError,
+)
 from .routes import router
 from .seed import seed
 
@@ -21,14 +26,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-
 app = FastAPI(title="NoteLoop API", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For dev, later restrict to frontend domain
-    allow_methods=["*"],
-    allow_headers=["*"]
-)
 app.include_router(router)
 
 
@@ -51,4 +49,5 @@ async def _rate_limited(request: Request, exc: Exception) -> JSONResponse:
 app.add_exception_handler(NotFoundError, _error(404))
 app.add_exception_handler(ConflictError, _error(409))
 app.add_exception_handler(LLMOutputError, _error(502))
+app.add_exception_handler(UnavailableError, _error(503))
 app.add_exception_handler(RateLimitedError, _rate_limited)

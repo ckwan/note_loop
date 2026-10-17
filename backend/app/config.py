@@ -15,11 +15,16 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
     draft_rate_limit_per_minute: int = 5
+    suggest_rate_limit_per_minute: int = 20
 
     temporal_enabled: bool = True
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     temporal_task_queue: str = "noteloop"
+
+    # Most claims per second sent to the payer, across all workers. 0 means no limit.
+    payer_max_per_second: float = 5.0
+    resubmit_chunk_size: int = 25
 
     # Demo switch. The first N submit attempts fail, so you can watch Temporal retry.
     simulate_payer_failures: int = 0

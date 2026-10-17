@@ -1,12 +1,12 @@
 """Business logic for notes. Routes call these functions and nothing else."""
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..errors import ConflictError, LLMOutputError, NotFoundError
-from ..llm import LLMProvider, parse_soap_json
+from ..llm import LLMProvider, parse_soap_json, parse_suggestions
 from ..models import AuditEvent, Claim, Note, TherapySession, utcnow
-from ..schemas import SECTIONS, NoteOut, SessionOut, SoapNote
+from ..schemas import SECTIONS, ClaimSummary, NoteOut, SessionOut, SoapNote
 
 MAX_ATTEMPTS = 2  # one try plus one retry on invalid model output
 
@@ -61,6 +61,23 @@ def session_to_out(session: TherapySession) -> SessionOut:
     )
 
 
+def _generate(call, parse, what: str):
+    """Call the LLM and validate the reply, retrying once on invalid output.
+
+    Returns the parsed result and the number of attempts used.
+    """
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            text = call()
+        except Exception as exc:
+            raise LLMOutputError("The LLM provider call failed") from exc
+        try:
+            return parse(text), attempt
+        except ValueError:
+            continue
+    raise LLMOutputError(f"The model did not return a valid {what}")
+
+
 def generate_draft(
     db: Session, session_id: int, raw_input: str, provider: LLMProvider
 ) -> Note:
@@ -68,20 +85,9 @@ def generate_draft(
     if session.note is not None and session.note.ai_draft is not None:
         raise ConflictError("A draft already exists for this session")
 
-    soap: SoapNote | None = None
-    attempts = 0
-    for attempts in range(1, MAX_ATTEMPTS + 1):
-        try:
-            text = provider.draft_soap(raw_input)
-        except Exception as exc:
-            raise LLMOutputError("The LLM provider call failed") from exc
-        try:
-            soap = parse_soap_json(text)
-            break
-        except ValueError:
-            continue
-    if soap is None:
-        raise LLMOutputError("The model did not return a valid SOAP note")
+    soap, attempts = _generate(
+        lambda: provider.draft_soap(raw_input), parse_soap_json, "SOAP note"
+    )
 
     note = Note(
         session_id=session_id,
@@ -97,7 +103,46 @@ def generate_draft(
     return note
 
 
-def update_final_note(db: Session, session_id: int, final_note: SoapNote) -> Note:
+def suggest_wording(
+    db: Session,
+    session_id: int,
+    current: SoapNote,
+    sections: list[str],
+    provider: LLMProvider,
+) -> dict[str, str]:
+    """Ask the LLM for more formal wording of sections the therapist has edited.
+
+    Nothing is saved to the note. The therapist decides whether to accept each
+    suggestion, and an accepted one is saved like any other edit.
+    """
+    note = _get_note(db, session_id)
+    if note.status == "signed":
+        raise ConflictError("A signed note cannot be changed")
+
+    values = current.model_dump()
+    chosen = {name: values[name] for name in sections}
+    suggestions, attempts = _generate(
+        lambda: provider.suggest_wording(chosen),
+        lambda text: parse_suggestions(text, list(chosen)),
+        "wording suggestion",
+    )
+    _audit(
+        db,
+        note,
+        _actor(note.session),
+        "suggestion_generated",
+        {"sections": list(chosen), "attempts": attempts},
+    )
+    db.commit()
+    return suggestions
+
+
+def update_final_note(
+    db: Session,
+    session_id: int,
+    final_note: SoapNote,
+    ai_assisted: list[str] | None = None,
+) -> Note:
     note = _get_note(db, session_id)
     if note.status == "signed":
         raise ConflictError("A signed note cannot be edited")
@@ -107,7 +152,11 @@ def update_final_note(db: Session, session_id: int, final_note: SoapNote) -> Not
     if edited:
         note.final_note = new_value
         note.updated_at = utcnow()
-        _audit(db, note, _actor(note.session), "edited", {"sections": edited})
+        detail: dict = {"sections": edited}
+        assisted = [name for name in edited if name in (ai_assisted or [])]
+        if assisted:
+            detail["ai_assisted"] = assisted
+        _audit(db, note, _actor(note.session), "edited", detail)
         db.commit()
     return note
 
@@ -141,6 +190,11 @@ def get_claim(db: Session, session_id: int) -> Claim:
     if claim is None:
         raise NotFoundError(f"Session {session_id} has no claim yet")
     return claim
+
+
+def claim_summary(db: Session) -> ClaimSummary:
+    rows = db.execute(select(Claim.status, func.count()).group_by(Claim.status)).all()
+    return ClaimSummary(**{status: count for status, count in rows})
 
 
 def list_audit(db: Session, session_id: int) -> list[AuditEvent]:

@@ -1,0 +1,24 @@
+# Python
+*.py[cod]
+__pycache__/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment variables and secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+web/AGENTS.md

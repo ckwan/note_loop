@@ -7,7 +7,14 @@ from temporalio.testing import ActivityEnvironment
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import AuditEvent, Claim
-from app.workflows.activities import mark_claim_failed, prepare_claim, submit_claim
+from app.demo_batch import create_failed_claims
+from app.workflows.activities import (
+    fetch_failed_claims,
+    mark_claim_failed,
+    prepare_claim,
+    reset_failed_claim,
+    submit_claim,
+)
 
 RAW = "Client reports poor sleep this week and feeling anxious before work meetings."
 
@@ -84,3 +91,50 @@ def test_mark_claim_failed_records_the_failure(client):
 
     assert claim_for(note_id).status == "failed"
     assert "claim_failed" in audit_actions(note_id)
+
+
+def test_fetch_failed_claims_pages_by_id_in_order(client):
+    create_failed_claims(5)
+    env = ActivityEnvironment()
+
+    first = env.run(fetch_failed_claims, 0, 2)
+    assert len(first) == 2
+    assert first[0].claim_id < first[1].claim_id
+
+    rest = env.run(fetch_failed_claims, first[-1].claim_id, 10)
+    assert len(rest) == 3
+    assert rest[0].claim_id > first[-1].claim_id
+    assert env.run(fetch_failed_claims, rest[-1].claim_id, 10) == []
+
+
+def test_fetch_failed_claims_skips_claims_that_are_not_failed(client):
+    note_id = signed_note_id(client)  # a pending claim, not a failed one
+    create_failed_claims(2)
+
+    refs = ActivityEnvironment().run(fetch_failed_claims, 0, 10)
+    assert len(refs) == 2
+    assert note_id not in [r.note_id for r in refs]
+
+
+def test_reset_failed_claim_is_repeatable(client):
+    create_failed_claims(1)
+    ref = ActivityEnvironment().run(fetch_failed_claims, 0, 1)[0]
+    env = ActivityEnvironment()
+
+    env.run(reset_failed_claim, ref.claim_id)
+    env.run(reset_failed_claim, ref.claim_id)
+
+    assert claim_for(ref.note_id).status == "created"
+    assert audit_actions(ref.note_id).count("claim_resubmit_requested") == 1
+
+
+def test_reset_leaves_a_submitted_claim_alone(client):
+    note_id = signed_note_id(client)
+    env = ActivityEnvironment()
+    claim_id = env.run(prepare_claim, note_id)
+    env.run(submit_claim, claim_id)
+
+    env.run(reset_failed_claim, claim_id)
+
+    assert claim_for(note_id).status == "submitted"
+    assert "claim_resubmit_requested" not in audit_actions(note_id)

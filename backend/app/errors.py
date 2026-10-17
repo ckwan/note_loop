@@ -10,6 +10,10 @@ class LLMOutputError(Exception):
     """The LLM failed or returned output that did not match the schema."""
 
 
+class UnavailableError(Exception):
+    """A required service is turned off or unreachable."""
+
+
 class RateLimitedError(Exception):
     """The caller made too many requests in the current window."""
 

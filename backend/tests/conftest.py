@@ -20,9 +20,14 @@ class RecordingStarter:
 
     def __init__(self) -> None:
         self.started: list[int] = []
+        self.batches: list[int] = []
 
     async def start_note_signed(self, note_id: int) -> None:
         self.started.append(note_id)
+
+    async def start_resubmit_failed(self, chunk_size: int) -> str:
+        self.batches.append(chunk_size)
+        return "resubmit-failed-claims"
 
 
 @pytest.fixture()

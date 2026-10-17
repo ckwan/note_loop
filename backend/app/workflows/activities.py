@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import AuditEvent, Claim, Note, utcnow
+from app.workflows.types import ClaimRef
 
 ACTOR = "system:temporal"
 
@@ -71,6 +72,38 @@ def submit_claim(claim_id: int) -> str:
             )
         db.commit()
         return claim.payer_reference or ""
+
+
+@activity.defn
+def fetch_failed_claims(after_id: int, limit: int) -> list[ClaimRef]:
+    """Return the next page of failed claims, ordered by id, after the cursor."""
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Claim.id, Claim.note_id)
+            .where(Claim.status == "failed", Claim.id > after_id)
+            .order_by(Claim.id)
+            .limit(limit)
+        ).all()
+        return [ClaimRef(claim_id=r.id, note_id=r.note_id) for r in rows]
+
+
+@activity.defn
+def reset_failed_claim(claim_id: int) -> int:
+    """Move a failed claim back to created so it can be submitted again.
+
+    Safe to repeat. A claim that is no longer failed is left as it is.
+    """
+    with SessionLocal() as db:
+        claim = db.get(Claim, claim_id)
+        if claim is None:
+            raise ApplicationError(f"Claim {claim_id} not found", non_retryable=True)
+
+        if claim.status == "failed":
+            claim.status = "created"
+            claim.updated_at = utcnow()
+            _audit(db, claim.note_id, "claim_resubmit_requested", {"claim_id": claim.id})
+        db.commit()
+        return claim.id
 
 
 @activity.defn
