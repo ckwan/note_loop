@@ -2,6 +2,8 @@
 
 An AI assisted progress note tool for therapists. The AI drafts a SOAP note from rough session notes, the therapist edits it, asks for better wording where needed, and signs it. Signing starts a durable background workflow that creates and submits an insurance claim.
 
+Status: portfolio project. Demo video: [link]. All data in this repo is synthetic, and the payer is simulated.
+
 ## What it does
 
 1. A therapist opens a session from the schedule and pastes rough notes.
@@ -107,6 +109,7 @@ flowchart TB
         FX --> H
     end
     P -.-> LS["LangSmith traces<br/>names and timings, no note text"]
+    P -.-> OBS["Metrics and alerts<br/>tokens, cost, latency,<br/>Slack on budget or failures"]
     subgraph Offline["Offline, before shipping a change"]
         C["Synthetic cases<br/>drafts and planted problems"] --> E["Eval runner<br/>python -m evals.run"]
         E --> P
@@ -175,7 +178,7 @@ sequenceDiagram
 * Backend: Python 3, FastAPI, SQLAlchemy, Pydantic
 * Storage: Postgres, Redis
 * Workflows: Temporal with the Python SDK for claims, and LangGraph with a Postgres checkpointer for the pre sign review
-* AI: an LLM behind a provider interface (local Ollama, or a deterministic stub for tests), LangGraph for the review loop, LangSmith for optional tracing
+* AI: an LLM behind a provider interface (local Ollama or a deterministic stub for tests), LangGraph for the review loop, LangSmith for optional tracing
 * Local setup: Docker Compose
 
 ## Why I built this
@@ -191,7 +194,7 @@ I also wanted to build the whole stack myself, with the schema at one end and th
 ## Design decisions
 
 * The human always signs. The AI drafts and suggests, but nothing is applied or final until a therapist accepts it or signs. The AI draft is stored separately and never changed, so comparing it with the signed text shows how much people had to fix.
-* Guardrails are code, not prompts. A prompt asking the model not to invent drugs is a request, and a rule that checks the output is a guarantee about what gets flagged.
+* Guardrails are code, not prompts. A prompt asking the model not to invent drugs is a request, and a rule that checks the output is a guarantee about what gets flagged. They run on every model, so swapping Ollama for Claude does not change what is caught.
 * Model output is validated with Pydantic reply models (`app/replies.py`). Each kind of reply, such as a SOAP note, a list of findings, wording suggestions, or fixes, is a typed model, so the shape is written once and the error says exactly what is wrong. A reply that fails gets one retry and then a 502. Each rejection is logged with where and what kind of problem it was, and never the reply itself, because the reply can contain note text. Both LLM calls sit behind a provider interface with a stub, so tests are repeatable and the app runs with no API key.
 * Temporal runs the work after signing, because the steps can fail partway. It gives durable state, retries with backoff, and a history of every attempt. Activities are idempotent, and the workflow ID comes from the note, so one note cannot start two workflows. The cost is more concepts and one more service than Celery.
 * The pending claim is written in the same transaction as the signature. If Temporal is down, the claim stays visibly pending and the follow up work is not lost.
@@ -201,6 +204,7 @@ I also wanted to build the whole stack myself, with the schema at one end and th
 * The supervisor is code, not a model. It merges findings from the reviewers and the rule based checks, credits every source on a duplicate, puts safety first, and keeps dismissed problems dismissed. Plain code gives the same answer every time and is simple to test. If one reviewer fails, the whole review fails with a 502 and does not skip it, because a skipped safety review that looks like a pass is worse than an error.
 * LangGraph and Temporal do different jobs. LangGraph controls an LLM step that has to wait for a person. Temporal runs the business process after signing. Each is weak where the other is strong, so I kept them apart.
 * Slack is for the people running the system. Messages carry ids, statuses, and counts, never patient names or note text. Failures and batch results are posted and successes are not, so a batch of 10,000 does not flood the channel. A failed Slack call is retried and then dropped, so it cannot fail a claim.
+* Alerts are rules on numbers I already collect, and they fire once per problem. A model that fails all day sends one message, not one per request. The check runs after the response and never raises, so a broken Slack setting cannot turn a working request into an error.
 * Redis rate limits the LLM endpoints and stores idempotency keys for signing. It fails open, because the database still blocks a double sign.
 
 
@@ -249,6 +253,18 @@ The stub provider is a baseline. It copies the notes and fills in nothing else, 
 ### CI
 
 `.github/workflows/ci.yml` runs on every push. It has three jobs: the backend tests and the eval gate, the web type check, lint and production build, and a check that `docker-compose.yml` is valid. The Temporal workflow tests download a test server, so on a CI runner they run instead of skipping.
+
+### Cost, latency, and alerts
+
+Every model call is timed and counted in one place, whichever provider made it. Each call records the provider, the model, what it was for (draft, review by a specific reviewer, fixes), the seconds it took, the tokens the provider reported, and an estimated cost.
+
+* **`GET /metrics`** serves these in Prometheus format: calls by outcome, tokens, estimated cost, a latency histogram, replies rejected by validation, and findings raised by the guardrails. It holds counts and labels only, never note text. There is no login on this API, so keep the path private.
+* **Slack alerts** fire from the same numbers, once per problem and not once per call: a daily budget in dollars or tokens, a run of failed calls in a row, and slow calls with a cooldown. Each is off at 0. Messages carry counts, seconds, and the model name. They are sent after the response, including when the request failed, and a bad Slack setting never breaks a request.
+* **Prices are yours to set.** `LLM_PRICE_INPUT_PER_MTOK` and `LLM_PRICE_OUTPUT_PER_MTOK` are dollars per million tokens and default to 0, because local models are free and prices change. The token budget works with free models.
+* **Evals report it too.** The last table of `python -m evals.run` shows calls, tokens, estimated cost, and p50 and p95 seconds per model, so one reviewer and three specialists can be compared on cost as well as quality. Pass `--price-in` and `--price-out` to price a run.
+* **Sample alert rules** for Prometheus are in `ops/prometheus-alerts.yml`.
+
+LangSmith and `/metrics` do different jobs. LangSmith shows one run in detail. `/metrics` shows the totals over time and drives the alerts.
 
 ### Tracing with LangSmith
 
@@ -304,8 +320,9 @@ The suite covers the note flow, validation and retry of model output, wording su
 3. Feed accepted and rejected suggestions back to the model as examples.
 4. Authentication, role based access control, and Postgres row level security.
 5. Alembic migrations, and a Temporal setup with persistent storage.
-6. Real claim generation and status tracking, with a payer acknowledgment signal and a timeout that moves a claim to manual review.
-7. A UI for the batch resubmit with live progress, and a Slack button that starts it. The button needs Slack interactivity, request signature checks, and an allow list of users.
-8. Errors and tracing through Sentry and Datadog, including LLM latency and cost.
-9. Streaming drafts to the browser.
-10. More note formats (DAP, BIRP) and treatment plans.
+6. A Grafana dashboard on `/metrics`, and a per model price table instead of one price pair.
+7. Real claim generation and status tracking, with a payer acknowledgment signal and a timeout that moves a claim to manual review.
+8. A UI for the batch resubmit with live progress, and a Slack button that starts it. The button needs Slack interactivity, request signature checks, and an allow list of users.
+9. Error tracking through Sentry.
+10. Streaming drafts to the browser.
+11. More note formats (DAP, BIRP) and treatment plans.
