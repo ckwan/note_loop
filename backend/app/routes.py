@@ -1,33 +1,44 @@
 import logging
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Response
 from fastapi.concurrency import run_in_threadpool
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from . import alerts, metrics
 from .config import get_settings
 from .db import get_db
 from .errors import NotFoundError
 from .idempotency import sign_once
 from .llm import LLMProvider, build_provider
 from .models import TherapySession
+from .notify import messages
+from .notify.notifier import Notifier, build_notifier, send_safely
 from .ratelimit import check_rate_limit
 from .redis_client import get_redis_client
+from .review import build_review_graph
+from .review.checkpointer import get_checkpointer
 from .schemas import (
     AuditOut,
     ClaimOut,
     ClaimSummary,
     DraftRequest,
+    EditSummaryOut,
     NoteOut,
     NoteUpdate,
     ResubmitOut,
     ResubmitRequest,
+    ReviewAnswerRequest,
+    ReviewOut,
+    ReviewStartRequest,
     SessionOut,
     SuggestionsOut,
     SuggestRequest,
 )
+from .services import admin as admin_svc
 from .services import notes as svc
+from .services import review as review_svc
 from .workflows.starter import NoopStarter, TemporalStarter, WorkflowStarter
 
 logger = logging.getLogger(__name__)
@@ -36,6 +47,31 @@ router = APIRouter()
 
 def get_llm_provider() -> LLMProvider:
     return build_provider(get_settings())
+
+
+def get_notifier() -> Notifier:
+    return build_notifier(get_settings())
+
+
+def _notify_if_unresolved(
+    out: ReviewOut, session_id: int, background: BackgroundTasks, notifier: Notifier
+) -> None:
+    """Tell Slack when a review ends with problems still open. Runs after the response."""
+    if out.status == "needs_attention":
+        findings = [(f.section, f.kind) for f in out.findings]
+        background.add_task(
+            send_safely,
+            notifier,
+            messages.review_needs_attention(session_id, out.round, findings),
+        )
+
+
+def get_review_graph(
+    provider: LLMProvider = Depends(get_llm_provider),
+    checkpointer=Depends(get_checkpointer),
+):
+    # Cheap to build per request. The checkpointer is the shared, durable part.
+    return build_review_graph(provider, checkpointer)
 
 
 def get_workflow_starter() -> WorkflowStarter:
@@ -71,9 +107,32 @@ def limit_suggestions(
         )
 
 
+def limit_reviews(
+    session_id: int,
+    db: Session = Depends(get_db),
+    r: Redis = Depends(get_redis_client),
+) -> None:
+    session = db.get(TherapySession, session_id)
+    if session is not None:
+        check_rate_limit(
+            r,
+            f"review:{session.therapist_id}",
+            get_settings().review_rate_limit_per_minute,
+        )
+
+
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@router.get("/metrics", include_in_schema=False)
+def prometheus_metrics() -> Response:
+    """Model call counts, tokens, cost and latency in Prometheus format. No note text.
+
+    There is no login on this API, so keep this path private in any real deployment.
+    """
+    return Response(metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @router.get("/sessions", response_model=list[SessionOut])
@@ -143,6 +202,54 @@ def suggest_note_wording(
     )
 
 
+@router.post(
+    "/sessions/{session_id}/note/review",
+    response_model=ReviewOut,
+    dependencies=[Depends(limit_reviews)],
+)
+def start_note_review(
+    session_id: int,
+    body: ReviewStartRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    graph=Depends(get_review_graph),
+    notifier: Notifier = Depends(get_notifier),
+):
+    """Check the note before signing. Pauses if a person needs to decide. Saves nothing."""
+    out = review_svc.start(db, graph, session_id, body.note)
+    _notify_if_unresolved(out, session_id, background, notifier)
+    return out
+
+
+@router.post(
+    "/sessions/{session_id}/note/review/resume",
+    response_model=ReviewOut,
+    dependencies=[Depends(limit_reviews)],
+)
+def answer_note_review(
+    session_id: int,
+    body: ReviewAnswerRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    graph=Depends(get_review_graph),
+    notifier: Notifier = Depends(get_notifier),
+):
+    """Send the therapist's decisions into a paused review."""
+    out = review_svc.answer(db, graph, session_id, body)
+    _notify_if_unresolved(out, session_id, background, notifier)
+    return out
+
+
+@router.get("/sessions/{session_id}/note/review", response_model=ReviewOut)
+def get_note_review(
+    session_id: int,
+    db: Session = Depends(get_db),
+    graph=Depends(get_review_graph),
+):
+    """The latest review of this note, so the UI can restore it after a reload."""
+    return review_svc.current(db, graph, session_id)
+
+
 @router.post("/sessions/{session_id}/note/sign", response_model=NoteOut)
 async def sign_note(
     session_id: int,
@@ -171,6 +278,21 @@ def get_claim(session_id: int, db: Session = Depends(get_db)):
         payer_reference=claim.payer_reference,
         submitted_at=claim.submitted_at,
     )
+
+
+@router.get("/admin/overview")
+def admin_overview(db: Session = Depends(get_db)) -> dict:
+    """Everything the admin page shows. Counts and labels only, never note text.
+
+    There is no login on this API, so keep this path private in any real deployment.
+    """
+    return admin_svc.overview(db)
+
+
+@router.get("/stats/edits", response_model=EditSummaryOut)
+def edit_stats_summary(therapist_id: int | None = None, db: Session = Depends(get_db)):
+    """How much therapists change the AI draft before signing, across signed notes."""
+    return svc.edit_summary(db, therapist_id)
 
 
 @router.get("/claims/summary", response_model=ClaimSummary)

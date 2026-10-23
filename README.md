@@ -25,25 +25,21 @@ Click any image to open it full size.
       <br><sub>Schedule</sub>
     </td>
     <td align="center">
-      <a href="images/02_rough_notes.png"><img src="images/02_rough_notes.png" width="280" alt="Rough session notes"></a>
+      <a href="images/draft_2.png"><img src="images/draft_2.png" width="280" alt="Rough session notes"></a>
       <br><sub>Rough notes</sub>
     </td>
     <td align="center">
-      <a href="images/03_soap_draft.png"><img src="images/03_soap_draft.png" width="280" alt="AI drafted SOAP note"></a>
+      <a href="images/ai_draft_3.png"><img src="images/ai_draft_3.png" width="280" alt="AI drafted SOAP note"></a>
       <br><sub>AI drafted SOAP note</sub>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <a href="images/04_suggest_wording.png"><img src="images/04_suggest_wording.png" width="280" alt="Suggested wording shown as a diff"></a>
-      <br><sub>Suggested wording as a diff</sub>
+      <a href="images/signing_4.png"><img src="images/signing_4.png" width="280" alt="Suggested wording shown as a diff"></a>
+      <br><sub>Signing Note</sub>
     </td>
     <td align="center">
-      <a href="images/05_audit_trail.png"><img src="images/05_audit_trail.png" width="280" alt="Audit trail"></a>
-      <br><sub>Audit trail</sub>
-    </td>
-    <td align="center">
-      <a href="images/06_temporal_workflow.png"><img src="images/06_temporal_workflow.png" width="280" alt="Claim workflow in the Temporal UI"></a>
+      <a href="images/temporal_6.png"><img src="images/temporal_6.png" width="280" alt="Claim workflow in the Temporal UI"></a>
       <br><sub>Claim workflow in Temporal</sub>
     </td>
   </tr>
@@ -71,7 +67,7 @@ flowchart LR
         T --> W2["Worker<br/>payer queue, rate limited"]
     end
     subgraph Outside["Outside services"]
-        LLM["LLM provider<br/>Ollama, Bedrock, or stub"]
+        LLM["LLM provider<br/>Ollama, Bedrock, Anthropic, or stub"]
         SL["Slack<br/>incoming webhook"]
     end
     UI -->|"/api proxy"| R
@@ -93,7 +89,7 @@ Every model call goes through the same path, whichever model is behind it. The e
 flowchart TB
     subgraph Live["Live, on every request"]
         IN["Session notes<br/>untrusted text"] --> G1["Input guardrails<br/>size limit, strip control characters,<br/>neutralize prompt tags"]
-        G1 --> P["Provider interface<br/>Ollama, Bedrock, or stub"]
+        G1 --> P["Provider interface<br/>Ollama, Bedrock, Anthropic, or stub"]
         P --> V["Output validation<br/>Pydantic reply models,<br/>one retry, 502"]
         V --> G2["Output guardrails<br/>grounding, safety mention,<br/>injection warning"]
         G2 --> H["Therapist reviews,<br/>edits, and signs"]
@@ -178,7 +174,7 @@ sequenceDiagram
 * Backend: Python 3, FastAPI, SQLAlchemy, Pydantic
 * Storage: Postgres, Redis
 * Workflows: Temporal with the Python SDK for claims, and LangGraph with a Postgres checkpointer for the pre sign review
-* AI: an LLM behind a provider interface (local Ollama or a deterministic stub for tests), LangGraph for the review loop, LangSmith for optional tracing
+* AI: an LLM behind a provider interface (local Ollama, Anthropic, or a deterministic stub for tests), LangGraph for the review loop, LangSmith for optional tracing
 * Local setup: Docker Compose
 
 ## Why I built this
@@ -265,6 +261,24 @@ Every model call is timed and counted in one place, whichever provider made it. 
 * **Sample alert rules** for Prometheus are in `ops/prometheus-alerts.yml`.
 
 LangSmith and `/metrics` do different jobs. LangSmith shows one run in detail. `/metrics` shows the totals over time and drives the alerts.
+
+### Edit rate: how much the therapist changes the draft
+
+The draft is saved once and never changed, and the therapist works on a separate copy, so the two can be compared at any time. NoteLoop turns that into a number: the share of words that were added, removed, or replaced, measured against the longer of the two texts. 0% means the draft was signed as written. 100% means none of it survived.
+
+* **On each note.** The API returns `edit_rate` and a rate for each SOAP section, and the signed banner shows it. The audit row for the signature stores the same numbers and no text.
+* **Across notes.** `GET /stats/edits` rolls up signed notes: the mean and median rate, the share signed unchanged, and the mean for each section. Add `?therapist_id=` to filter. A section that is always rewritten points at a prompt or model problem in that section.
+* **Over time.** `/metrics` has `noteloop_note_edit_rate` and `noteloop_section_edit_rate` histograms, so a model or prompt change can be compared before and after.
+* **What it does not tell you.** A low rate can mean a good draft or a therapist who signs without reading, which is what the review step and the guardrails are for. A high rate can mean a poor draft or a therapist who prefers their own wording. Read it next to the eval scores, not instead of them. With synthetic data the numbers only show that the plumbing works, not how good the drafts are.
+
+### Admin page
+
+`/admin` in the web app shows how the review is behaving across all notes. It has no login, like the rest of the app, so keep it private in any real deployment. It reads `GET /admin/overview`, which works everything out from the audit trail, the claims table, the model call counters, and saved eval results, so it needs no extra storage. Counts and labels only. No note text.
+
+* **Safety net.** Reviews run, notes signed without any review, and notes signed while the review still had open problems. Signing does not require a review today, and the first two numbers show how often that happens.
+* **Reviewers.** For the grounding, safety, and billing reviewers and the rules, how many problems each raised, how many were merged with another reviewer's by the supervisor, and what the therapist did with them. A reviewer whose findings are mostly kept as written is probably noisy. Decisions are recorded per section, so each finding in a section is credited with the decision.
+* **Edits, claims, and model calls.** The edit rate by section, the claim pipeline counts, and calls, tokens, cost, and p50 and p95 seconds by purpose since the API started.
+* **Evals.** The latest saved run for each model, read from `backend/evals/results`. It stays empty on a server that has never run the evals.
 
 ### Tracing with LangSmith
 

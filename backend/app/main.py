@@ -12,22 +12,31 @@ from .errors import (
     RateLimitedError,
     UnavailableError,
 )
+from .alert_middleware import LLMAlertMiddleware
+from .review.checkpointer import close_checkpointer, get_checkpointer
 from .routes import router
 from .seed import seed
+from .tracing import configure_tracing
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Uses create_all for now. Switch to Alembic migrations when the schema settles.
+    configure_tracing(get_settings())
     Base.metadata.create_all(engine)
+    # Create the review checkpoint tables now. Doing it during a request hangs,
+    # because one migration waits for every open transaction, including that request's.
+    get_checkpointer()
     if get_settings().seed_on_start:
         with SessionLocal() as db:
             seed(db)
     yield
+    close_checkpointer()
 
 
 app = FastAPI(title="NoteLoop API", lifespan=lifespan)
 app.include_router(router)
+app.add_middleware(LLMAlertMiddleware)
 
 
 def _error(status: int):

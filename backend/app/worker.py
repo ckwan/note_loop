@@ -10,13 +10,16 @@ from temporalio.worker import Worker
 from app.config import get_settings
 from app.workflows.activities import (
     fetch_failed_claims,
+    get_claim_counts,
     mark_claim_failed,
+    notify_slack,
     prepare_claim,
     reset_failed_claim,
     submit_claim,
 )
 from app.workflows.types import PAYER_TASK_QUEUE
 from app.workflows.workflows import (
+    DailySummaryWorkflow,
     NoteSignedWorkflow,
     ResubmitClaimWorkflow,
     ResubmitFailedClaimsWorkflow,
@@ -40,12 +43,19 @@ def build_workers(
     main = Worker(
         client,
         task_queue=task_queue,
-        workflows=[NoteSignedWorkflow, ResubmitClaimWorkflow, ResubmitFailedClaimsWorkflow],
+        workflows=[
+            NoteSignedWorkflow,
+            ResubmitClaimWorkflow,
+            ResubmitFailedClaimsWorkflow,
+            DailySummaryWorkflow,
+        ],
         activities=[
             prepare_claim,
             mark_claim_failed,
             reset_failed_claim,
             fetch_failed_claims,
+            notify_slack,
+            get_claim_counts,
         ],
         # Activities are plain sync functions that use the sync SQLAlchemy session.
         activity_executor=executor,
