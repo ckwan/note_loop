@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Slack incoming webhook for monitoring messages. Leave empty to turn Slack off.
     # Treat the URL as a secret.
     slack_webhook_url: str | None = None
+    # Also post to Slack when a signed note's claim is submitted and when it is approved.
+    # Off by default, because a busy clinic would flood the channel.
+    slack_notify_claim_events: bool = False
     # Used to link a message to its workflow.
     temporal_ui_url: str = "http://localhost:8233"
 

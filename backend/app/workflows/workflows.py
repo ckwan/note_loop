@@ -11,6 +11,7 @@ with workflow.unsafe.imports_passed_through():
     from app.workflows.activities import (
         check_claim_decision,
         mark_claim_follow_up,
+        notify_claim_event,
         fetch_failed_claims,
         get_claim_counts,
         mark_claim_failed,
@@ -52,12 +53,26 @@ async def _notify(notification: Notification) -> None:
         workflow.logger.warning("Slack notification failed: %s", notification.title)
 
 
+async def _notify_event(notification: Notification) -> None:
+    """A routine claim event. The activity decides whether Slack gets it."""
+    try:
+        await workflow.execute_activity(
+            notify_claim_event,
+            args=[notification, workflow.info().workflow_id],
+            start_to_close_timeout=NOTIFY_TIMEOUT,
+            retry_policy=NOTIFY_RETRY,
+        )
+    except ActivityError:
+        workflow.logger.warning("Slack notification failed: %s", notification.title)
+
+
 # The batch workflow restarts itself with a fresh history after this many chunks,
 # so a very large batch never grows one workflow's history without limit.
 CHUNKS_PER_RUN = 20
 
 
 CLAIM_TRACKING_PATCH = "claim-decision-tracking"
+CLAIM_EVENTS_PATCH = "claim-event-notifications"
 
 
 async def _track_decision(claim_id: int, note_id: int) -> None:
@@ -90,7 +105,10 @@ async def _track_decision(claim_id: int, note_id: int) -> None:
 
     if check is not None and check.state == "denied":
         await _notify(messages.claim_denied(note_id, claim_id))
-    elif check is not None and check.state in ("approved", "not_applicable"):
+    elif check is not None and check.state == "approved":
+        if workflow.patched(CLAIM_EVENTS_PATCH):
+            await _notify_event(messages.claim_approved(note_id, claim_id))
+    elif check is not None and check.state == "not_applicable":
         return
     else:
         await workflow.execute_activity(
@@ -136,6 +154,8 @@ class NoteSignedWorkflow:
             await _notify(messages.claim_failed(note_id))
             raise
 
+        if workflow.patched(CLAIM_EVENTS_PATCH):
+            await _notify_event(messages.claim_submitted(note_id, claim_id))
         # Workflows already running when this was added never reach this step.
         if workflow.patched(CLAIM_TRACKING_PATCH):
             await _track_decision(claim_id, note_id)

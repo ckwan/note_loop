@@ -18,6 +18,24 @@ def claim_failed(note_id: int) -> Notification:
     )
 
 
+def claim_submitted(note_id: int, claim_id: int) -> Notification:
+    return Notification(
+        title="Claim submitted",
+        body="A signed note's claim was handed to the payer.",
+        level="info",
+        fields={"Note": str(note_id), "Claim": str(claim_id), "Status": "submitted"},
+    )
+
+
+def claim_approved(note_id: int, claim_id: int) -> Notification:
+    return Notification(
+        title="Claim approved",
+        body="The adjudication service approved this claim.",
+        level="success",
+        fields={"Note": str(note_id), "Claim": str(claim_id), "Status": "approved"},
+    )
+
+
 def claim_denied(note_id: int, claim_id: int) -> Notification:
     return Notification(
         title="Claim denied",

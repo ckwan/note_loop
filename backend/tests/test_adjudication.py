@@ -282,3 +282,37 @@ def test_simulated_mode_does_not_touch_the_claims_api(client, api, monkeypatch):
     run_workflow(NoteSignedWorkflow.run, note_id, f"test-{note_id}")
     assert claim_for(note_id).status == "submitted"
     assert api.requests == []
+
+
+# --- Slack claim events -----------------------------------------------------------
+
+def test_claim_events_are_off_by_default(client, api, monkeypatch):
+    rec = _Recorder()
+    use_notifier(monkeypatch, rec)
+    note_id = signed_note_id(client)
+    run_workflow(NoteSignedWorkflow.run, note_id, f"test-{note_id}")
+    assert rec.sent == []
+
+
+def test_submitted_and_approved_events_go_to_slack_when_on(client, api, monkeypatch):
+    rec = _Recorder()
+    use_notifier(monkeypatch, rec)
+    monkeypatch.setattr(get_settings(), "slack_notify_claim_events", True)
+    note_id = signed_note_id(client)
+
+    run_workflow(NoteSignedWorkflow.run, note_id, f"test-{note_id}")
+
+    assert titles(rec) == ["Claim submitted", "Claim approved"]
+    for n in rec.sent:
+        assert set(n.fields) == {"Note", "Claim", "Status"}
+
+
+def test_simulated_mode_sends_only_the_submitted_event(client, monkeypatch):
+    rec = _Recorder()
+    use_notifier(monkeypatch, rec)
+    monkeypatch.setattr(get_settings(), "slack_notify_claim_events", True)
+    note_id = signed_note_id(client)
+
+    run_workflow(NoteSignedWorkflow.run, note_id, f"test-{note_id}")
+
+    assert titles(rec) == ["Claim submitted"]

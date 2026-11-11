@@ -253,6 +253,16 @@ def notify_slack(notification: Notification, workflow_id: str | None = None) -> 
 
 
 @activity.defn
+def notify_claim_event(notification: Notification, workflow_id: str | None = None) -> None:
+    """Like notify_slack, but only when SLACK_NOTIFY_CLAIM_EVENTS is on.
+
+    The setting is read here, not in the workflow, so the workflow stays deterministic.
+    """
+    if get_settings().slack_notify_claim_events:
+        notify_slack(notification, workflow_id)
+
+
+@activity.defn
 def get_claim_counts() -> dict[str, int]:
     """Claims by status, for the daily summary."""
     with SessionLocal() as db:

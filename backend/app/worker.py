@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.workflows.activities import (
     check_claim_decision,
     mark_claim_follow_up,
+    notify_claim_event,
     fetch_failed_claims,
     get_claim_counts,
     mark_claim_failed,
@@ -59,6 +60,7 @@ def build_workers(
             notify_slack,
             get_claim_counts,
             mark_claim_follow_up,
+            notify_claim_event,
         ],
         # Activities are plain sync functions that use the sync SQLAlchemy session.
         activity_executor=executor,
