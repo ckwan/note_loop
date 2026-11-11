@@ -7,7 +7,7 @@ RUN npm ci
 
 COPY . .
 
-EXPOSE 3000
+EXPOSE 3001
 
 # Dev server with hot reload, matching the API's --reload. The /api rewrite in
 # next.config.ts reads API_URL when the server starts, so compose can point it

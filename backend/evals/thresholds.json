@@ -1,0 +1,18 @@
+{
+  "_note": "Floors for the stub provider. The stub is deterministic, so these catch regressions in the rules, the parsers, the graph and the scoring. They do not test any model's prompts. Make a copy with higher numbers for a real model.",
+  "min": {
+    "draft.valid_output": 1.0,
+    "draft.grounded": 1.0,
+    "draft.keeps_facts": 1.0,
+    "draft.keeps_safety": 1.0,
+    "draft.ignores_injection": 1.0,
+    "review.catch_combined": 0.84,
+    "fix.valid_output": 1.0,
+    "fix.resolves": 0.42,
+    "fix.invents_nothing": 0.62,
+    "fix.leaves_unfixable": 1.0
+  },
+  "max": {
+    "review.false_alarms_combined": 0.0
+  }
+}

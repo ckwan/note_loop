@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, event, inspect
+from sqlalchemy import JSON, DateTime, Numeric, ForeignKey, String, Text, event, inspect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -86,9 +86,15 @@ class Claim(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     note_id: Mapped[int] = mapped_column(ForeignKey("notes.id"), unique=True)
-    # pending (queued) -> created -> submitted, or failed
+    # pending (queued) -> created -> submitted, or failed.
+    # Adjudication mode adds approved, denied, and manual_follow_up (the decision did
+    # not arrive in time, so a person checks it).
     status: Mapped[str] = mapped_column(String(20), default="pending")
     payer_reference: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Adjudication mode only.
+    amount: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    remote_claim_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remote_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

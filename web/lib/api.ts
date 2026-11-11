@@ -1,4 +1,14 @@
-import type { AuditEvent, Claim, Note, SessionSummary, SoapNote } from "./types";
+import type {
+  AdminOverview,
+  AuditEvent,
+  Claim,
+  Note,
+  ReviewDecision,
+  ReviewResult,
+  Section,
+  SessionSummary,
+  SoapNote,
+} from "./types";
 
 // Requests go through the rewrite in next.config.ts, so there is no CORS setup.
 const BASE = "/api";
@@ -61,11 +71,20 @@ export const createDraft = (sessionId: number, rawInput: string) =>
     body: JSON.stringify({ raw_input: rawInput }),
   });
 
-export const saveNote = (sessionId: number, finalNote: SoapNote) =>
+// aiAssisted lists sections whose text came from an accepted AI suggestion, so the
+// audit trail can show which edits were AI assisted.
+export const saveNote = (sessionId: number, finalNote: SoapNote, aiAssisted: Section[] = []) =>
   request<Note>(`/sessions/${sessionId}/note`, {
     method: "PUT",
-    body: JSON.stringify({ final_note: finalNote }),
+    body: JSON.stringify({ final_note: finalNote, ai_assisted_sections: aiAssisted }),
   });
+
+// Sends the text currently on screen, saved or not. Nothing is stored by this call.
+export const suggestWording = (sessionId: number, note: SoapNote, sections: Section[]) =>
+  request<{ suggestions: Partial<Record<Section, string>> }>(
+    `/sessions/${sessionId}/note/suggest`,
+    { method: "POST", body: JSON.stringify({ note, sections }) },
+  );
 
 // The idempotency key makes a repeated click or a network retry return the first
 // result instead of an error.
@@ -89,3 +108,33 @@ export async function getClaim(sessionId: number): Promise<Claim | null> {
 
 export const getAudit = (sessionId: number) =>
   request<AuditEvent[]>(`/sessions/${sessionId}/note/audit`);
+
+// Checks the text on screen against the rough session notes. Saves nothing. The result
+// may be paused, waiting for answerReview.
+export const startReview = (sessionId: number, note: SoapNote) =>
+  request<ReviewResult>(`/sessions/${sessionId}/note/review`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+
+export const answerReview = (
+  sessionId: number,
+  decisions: Partial<Record<Section, ReviewDecision>>,
+  edits: Partial<Record<Section, string>>,
+) =>
+  request<ReviewResult>(`/sessions/${sessionId}/note/review/resume`, {
+    method: "POST",
+    body: JSON.stringify({ decisions, edits }),
+  });
+
+// The latest review, so a paused one can be restored after a reload.
+export async function getReview(sessionId: number): Promise<ReviewResult | null> {
+  try {
+    return await request<ReviewResult>(`/sessions/${sessionId}/note/review`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+export const getAdminOverview = () => request<AdminOverview>("/admin/overview");

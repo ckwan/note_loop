@@ -2,7 +2,7 @@ import { diffWords } from "diff";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SECTIONS, SECTION_LABELS, type SoapNote } from "@/lib/types";
 
-function InlineDiff({ before, after }: { before: string; after: string }) {
+export function InlineDiff({ before, after }: { before: string; after: string }) {
   const parts = diffWords(before, after);
   return (
     <p className="text-sm leading-6 whitespace-pre-wrap">

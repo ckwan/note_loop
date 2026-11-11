@@ -204,6 +204,39 @@ I also wanted to build the whole stack myself, with the schema at one end and th
 * Redis rate limits the LLM endpoints and stores idempotency keys for signing. It fails open, because the database still blocks a double sign.
 
 
+### Adjudication service mode
+
+`PAYER_MODE=simulated` (the default) keeps the built in fake payer. `PAYER_MODE=adjudication` hands each signed note's claim to the Claims Feedback Loop API and tracks the decision. An unknown mode, or adjudication without a URL or org id, stops the API and the worker at startup.
+
+| Variable | Meaning |
+| --- | --- |
+| `PAYER_MODE` | `simulated` or `adjudication` |
+| `CLAIMS_API_URL` | Base URL of the Claims API (required in adjudication mode) |
+| `CLAIMS_ORG_ID` | Tenant id, sent as `org_id` and as the `X-Org-Id` header (required) |
+| `CLAIMS_HTTP_TIMEOUT_SECONDS` | Per request timeout, default 10 |
+| `CLAIMS_POLL_INTERVAL_SECONDS` | Wait between status checks, default 30 |
+| `CLAIMS_POLL_MAX_WAIT_SECONDS` | Longest total wait for a decision, default 3600 |
+| `CLAIM_DEFAULT_AMOUNT` | Claims have no amount of their own yet, so this is sent |
+
+To turn it on, put the variables in `.env` and restart the api and worker (both read `.env`):
+
+```
+PAYER_MODE=adjudication
+CLAIMS_API_URL=https://claims.example.com
+CLAIMS_ORG_ID=your-org-id
+CLAIMS_POLL_INTERVAL_SECONDS=30
+```
+
+**Contract.**
+* `POST {CLAIMS_API_URL}/claims` with `X-Org-Id` and `{org_id, external_ref, claimant_name, amount, history_notes}`. `org_id` and the header must match, or the API returns 403. 201 (created) and 200 (already existed) both count as success. `external_ref` is the note id, so a retried activity returns the same claim and never creates a duplicate. The returned id is stored as `remote_claim_id`.
+* `GET {CLAIMS_API_URL}/claims/{id}` returns `open`, `under_review`, `approved`, or `denied`. The last two are final.
+* 5xx responses and timeouts are retried with the normal retry policy. Any other 4xx fails the claim without retrying.
+* The call runs on the rate limited payer queue, like the simulated one.
+
+**Privacy rule.** The request carries no note text, no session notes, and no patient name. `claimant_name` is an opaque reference (a hash of the org id and the patient id), `history_notes` is the fixed text "Outpatient session claim", and the payload builder only receives ids and the amount. A test checks the outgoing request for note content, session notes, and the patient's name.
+
+**Tracking the decision.** After submit, the workflow checks the status, sleeps with `workflow.sleep`, and checks again until the decision is final or the maximum wait passes. Every change of remote status is written to the audit trail. `approved` and `denied` become claim statuses. A timeout, or a status check that keeps failing, moves the claim to `manual_follow_up` and does not fail the workflow. Slack gets a message for a denied claim and for a follow up, with ids and statuses only. The step is behind `workflow.patched("claim-decision-tracking")`, so workflows already running keep their old history.
+
 ### Try the batch resubmit
 
 1. In `.env`, set `SIMULATE_PAYER_FAILURES=0` so submissions succeed.
@@ -294,7 +327,7 @@ Slack is a monitoring channel for whoever runs the system. It is not part of the
 2. Put the URL in `.env` as `SLACK_WEBHOOK_URL=...` and restart the api and worker. Treat the URL as a secret. With no URL set, nothing is sent.
 3. Create the daily summary schedule once: `docker compose exec worker python -m app.schedules`
 
-Messages are sent for a claim that fails after all its retries, a batch resubmit starting and finishing (with counts), a review that ends with open findings, and a daily summary of claims by status. A successful claim sends nothing, so a batch of 10,000 does not flood the channel. Each Temporal message links to its workflow in the Temporal UI.
+Messages are sent for a claim that fails after all its retries, a batch resubmit starting and finishing (with counts), a review that ends with open findings, a claim denied by the adjudication service, a claim moved to manual follow up, and a daily summary of claims by status. A successful claim sends nothing, so a batch of 10,000 does not flood the channel. Each Temporal message links to its workflow in the Temporal UI.
 
 A message never contains a patient name or any note text. Only ids, statuses, and counts. A failed Slack call is retried a few times and then dropped. It never fails a claim, a batch, or a review.
 
@@ -306,7 +339,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-The suite covers the note flow, validation and retry of model output, wording suggestions, every branch of the review graph and its API, rate limiting, idempotent signing, Slack messages, the Temporal activities, and the batch endpoints. The end to end workflow tests need a Temporal test server. They skip when the SDK cannot download one. To run them against a local Temporal CLI, set `TEMPORAL_DEV_SERVER_PATH` to the `temporal` binary.
+The suite covers the note flow, adjudication mode against a mocked Claims API (no network), validation and retry of model output, wording suggestions, every branch of the review graph and its API, rate limiting, idempotent signing, Slack messages, the Temporal activities, and the batch endpoints. The end to end workflow tests need a Temporal test server. They skip when the SDK cannot download one. To run them against a local Temporal CLI, set `TEMPORAL_DEV_SERVER_PATH` to the `temporal` binary.
 
 ## Responsible AI and PHI
 
@@ -320,12 +353,14 @@ The suite covers the note flow, validation and retry of model output, wording su
 
 * There is no authentication. The audit trail attributes actions to the session owner.
 * Tables are created at startup. There are no Alembic migrations yet.
-* The payer is simulated, and the claim is a stub record, not a real claim format.
+* The payer is simulated unless `PAYER_MODE=adjudication`, and the claim is a stub record, not a real claim format.
+* Adjudication mode polls for the decision. The Claims API has no webhook, so a decision can arrive up to one poll interval late, and a claim still undecided after the maximum wait needs a person (`manual_follow_up`). The batch resubmit does not poll, so a resubmitted claim stays `submitted` in this mode.
+* Tables are created at startup, so an existing database needs the new `claims` columns (`amount`, `remote_claim_id`, `remote_status`) added by hand. `/claims/summary` still reports only the original four statuses.
 * The Temporal dev server in Docker Compose keeps history in memory, so restarting it clears workflow history.
 * The batch resubmit has an API endpoint but no button in the UI.
 * Wording suggestions and the review have not been evaluated on a real model with clinician review. With the stub provider, the review is a set of simple rules and not real analysis. It is not a clinical safety control.
 * Slack messages have only been tested against a mock server. The first real webhook may need small formatting changes.
-* The review runs in the API process. Adding steps to a Temporal workflow that is already running would need `workflow.patched` versioning in production.
+* The review runs in the API process. The decision tracking step uses `workflow.patched`. Any further step added to a running workflow needs the same.
 
 ## Future improvements
 

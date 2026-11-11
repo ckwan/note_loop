@@ -2,7 +2,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, get_args
 
 import httpx
 from langsmith.run_helpers import get_current_run_tree, traceable
@@ -11,12 +11,13 @@ from . import metrics
 from .config import Settings, get_settings
 from .guardrails import neutralize_tags
 from .replies import (  # noqa: F401  (re-exported: other modules import them from here)
+    extract_json_object,
     parse_findings,
     parse_fixes,
     parse_soap_json,
     parse_suggestions,
 )
-from .schemas import SECTIONS, Finding, SoapNote
+from .schemas import SECTIONS, Finding, FindingKind, SoapNote
 
 SYSTEM_PROMPT = """You are a documentation assistant for licensed therapists. \
 Turn the rough session notes into a SOAP progress note.
@@ -514,12 +515,57 @@ def build_provider(settings: Settings) -> LLMProvider:
     raise ValueError(f"Unknown LLM_PROVIDER {name!r}. Use one of: {', '.join(PROVIDERS)}")
 
 
+_SECTION_LETTERS = {"s": "subjective", "o": "objective", "a": "assessment", "p": "plan"}
+_KINDS = get_args(FindingKind)
+
+
+def _clean_section(value) -> str | None:
+    """Small models write "Subjective", "S", or "the plan section". Accept those."""
+    if not isinstance(value, str):
+        return None
+    word = value.strip().lower()
+    if word in _SECTION_LETTERS:
+        return _SECTION_LETTERS[word]
+    for name in SECTIONS:
+        if name in word:
+            return name
+    return None
+
+
+def _clean_kind(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    word = value.strip().lower().replace(" ", "_").replace("-", "_")
+    return word if word in _KINDS else None
+
+
 def parse_role_findings(text: str, role: str) -> list[Finding]:
     """Validate a specialist's reply. Findings outside its kinds are dropped, and each one
-    is tagged with the role so the therapist can see who raised it."""
+    is tagged with the role so the therapist can see who raised it.
+
+    Near miss wording in section or kind is fixed. A finding that still makes no sense is
+    skipped. If every finding is unusable the reply is rejected, so garbage is never read
+    as a clean review.
+    """
     allowed = ROLES[role][1]
-    return [
-        f.model_copy(update={"source": role})
-        for f in parse_findings(text)
-        if f.kind in allowed
-    ]
+    reply = extract_json_object(text)
+    items = reply.get("findings")
+    if not isinstance(items, list):
+        raise ValueError("findings must be a list")
+
+    found: list[Finding] = []
+    unusable = 0
+    for item in items:
+        item = item if isinstance(item, dict) else {}
+        section, kind = _clean_section(item.get("section")), _clean_kind(item.get("kind"))
+        message = item.get("message")
+        if section is None or kind is None or not isinstance(message, str) or not message.strip():
+            unusable += 1
+            continue
+        if kind in allowed:
+            found.append(
+                Finding(section=section, kind=kind, message=message.strip(), source=role)
+            )
+    if items and unusable == len(items):
+        raise ValueError("no usable findings in the reply")
+    return found

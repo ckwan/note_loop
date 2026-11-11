@@ -6,9 +6,15 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
+    from app.notify import messages
+    from app.notify.types import Notification
     from app.workflows.activities import (
+        check_claim_decision,
+        mark_claim_follow_up,
         fetch_failed_claims,
+        get_claim_counts,
         mark_claim_failed,
+        notify_slack,
         prepare_claim,
         reset_failed_claim,
         submit_claim,
@@ -28,9 +34,72 @@ RETRY = RetryPolicy(
 )
 TIMEOUT = timedelta(seconds=30)
 
+# Slack messages get a few quick tries. They are never worth holding a workflow up.
+NOTIFY_RETRY = RetryPolicy(initial_interval=timedelta(seconds=2), maximum_attempts=3)
+NOTIFY_TIMEOUT = timedelta(seconds=10)
+
+
+async def _notify(notification: Notification) -> None:
+    """Send a Slack message. If it still fails after its retries, carry on."""
+    try:
+        await workflow.execute_activity(
+            notify_slack,
+            args=[notification, workflow.info().workflow_id],
+            start_to_close_timeout=NOTIFY_TIMEOUT,
+            retry_policy=NOTIFY_RETRY,
+        )
+    except ActivityError:
+        workflow.logger.warning("Slack notification failed: %s", notification.title)
+
+
 # The batch workflow restarts itself with a fresh history after this many chunks,
 # so a very large batch never grows one workflow's history without limit.
 CHUNKS_PER_RUN = 20
+
+
+CLAIM_TRACKING_PATCH = "claim-decision-tracking"
+
+
+async def _track_decision(claim_id: int, note_id: int) -> None:
+    """Poll the adjudication service until a final decision or the maximum wait.
+
+    A tracking failure never fails the workflow. The claim is already submitted, so it
+    moves to manual follow up instead.
+    """
+    try:
+        check = await workflow.execute_activity(
+            check_claim_decision,
+            claim_id,
+            task_queue=PAYER_TASK_QUEUE,
+            start_to_close_timeout=TIMEOUT,
+            retry_policy=RETRY,
+        )
+        waited = 0.0
+        while check.state == "pending" and waited < check.max_wait_seconds:
+            await workflow.sleep(check.poll_interval_seconds)
+            waited += check.poll_interval_seconds
+            check = await workflow.execute_activity(
+                check_claim_decision,
+                claim_id,
+                task_queue=PAYER_TASK_QUEUE,
+                start_to_close_timeout=TIMEOUT,
+                retry_policy=RETRY,
+            )
+    except ActivityError:
+        check = None
+
+    if check is not None and check.state == "denied":
+        await _notify(messages.claim_denied(note_id, claim_id))
+    elif check is not None and check.state in ("approved", "not_applicable"):
+        return
+    else:
+        await workflow.execute_activity(
+            mark_claim_follow_up,
+            claim_id,
+            start_to_close_timeout=TIMEOUT,
+            retry_policy=RETRY,
+        )
+        await _notify(messages.claim_needs_follow_up(note_id, claim_id))
 
 
 @workflow.defn
@@ -50,7 +119,7 @@ class NoteSignedWorkflow:
                 start_to_close_timeout=TIMEOUT,
                 retry_policy=RETRY,
             )
-            return await workflow.execute_activity(
+            reference = await workflow.execute_activity(
                 submit_claim,
                 claim_id,
                 task_queue=PAYER_TASK_QUEUE,
@@ -64,7 +133,13 @@ class NoteSignedWorkflow:
                 start_to_close_timeout=TIMEOUT,
                 retry_policy=RETRY,
             )
+            await _notify(messages.claim_failed(note_id))
             raise
+
+        # Workflows already running when this was added never reach this step.
+        if workflow.patched(CLAIM_TRACKING_PATCH):
+            await _track_decision(claim_id, note_id)
+        return reference
 
 
 @workflow.defn
@@ -124,6 +199,11 @@ class ResubmitFailedClaimsWorkflow:
             if not page:
                 break
 
+            if params.after_id == 0 and chunks_this_run == 0:
+                # Only the first run of the batch. A continue as new run starts
+                # with a cursor, so this message is not repeated.
+                await _notify(messages.batch_started(params.chunk_size))
+
             outcomes = await asyncio.gather(
                 *[
                     workflow.execute_child_workflow(
@@ -149,8 +229,25 @@ class ResubmitFailedClaimsWorkflow:
             if chunks_this_run >= CHUNKS_PER_RUN:
                 workflow.continue_as_new(params)
 
+        await _notify(
+            messages.batch_finished(params.processed, params.succeeded, params.failed)
+        )
         return BatchResult(
             processed=params.processed,
             succeeded=params.succeeded,
             failed=params.failed,
         )
+
+
+@workflow.defn
+class DailySummaryWorkflow:
+    """Post claim counts to Slack. Started once a day by a Temporal Schedule."""
+
+    @workflow.run
+    async def run(self) -> None:
+        counts = await workflow.execute_activity(
+            get_claim_counts,
+            start_to_close_timeout=TIMEOUT,
+            retry_policy=RETRY,
+        )
+        await _notify(messages.daily_summary(counts))

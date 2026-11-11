@@ -22,7 +22,7 @@ export default function ScheduleList() {
       })
       .catch(() => {
         if (!cancelled) {
-          setError("Could not load sessions. Is the API running on port 8000?");
+          setError("Could not load sessions. Is the API running on port 8001?");
         }
       });
     return () => {

@@ -1,0 +1,42 @@
+# Example alert rules for Prometheus, on the metrics at GET /metrics.
+# The thresholds are starting points. I have not run these in a live Prometheus,
+# so check them with `promtool check rules` before relying on them.
+groups:
+  - name: noteloop-llm
+    rules:
+      - alert: ModelCallsFailing
+        expr: |
+          sum(rate(noteloop_llm_calls_total{outcome="error"}[5m]))
+            / sum(rate(noteloop_llm_calls_total[5m])) > 0.2
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: More than 20 percent of model calls are failing.
+
+      - alert: ModelCallsSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, model) (rate(noteloop_llm_call_seconds_bucket[10m]))) > 30
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: The slowest 5 percent of model calls take over 30 seconds.
+
+      - alert: ModelTokenSpendHigh
+        expr: sum(increase(noteloop_llm_tokens_total[1h])) > 500000
+        labels: {severity: warn}
+        annotations:
+          summary: More than 500,000 tokens used in the last hour.
+
+      - alert: ModelCostHigh
+        expr: sum(increase(noteloop_llm_cost_usd_total[24h])) > 5
+        labels: {severity: warn}
+        annotations:
+          summary: Estimated model spend is over 5 dollars in 24 hours.
+
+      - alert: ModelRepliesRejected
+        expr: sum(rate(noteloop_llm_replies_rejected_total[15m])) > 0.05
+        for: 15m
+        labels: {severity: warn}
+        annotations:
+          summary: The model keeps returning replies that fail validation.

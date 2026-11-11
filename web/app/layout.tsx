@@ -17,7 +17,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/" className="text-lg font-semibold">
               NoteLoop
             </Link>
-            <Badge variant="warning">Synthetic data only</Badge>
+            <div className="flex items-center gap-4">
+              <Link href="/admin" className="text-sm text-muted-foreground hover:text-foreground">
+                Admin
+              </Link>
+              <Badge variant="warning">Synthetic data only</Badge>
+            </div>
           </div>
         </header>
         <main className="mx-auto max-w-5xl px-6 py-8">{children}</main>

@@ -9,6 +9,8 @@ from temporalio.worker import Worker
 
 from app.config import get_settings
 from app.workflows.activities import (
+    check_claim_decision,
+    mark_claim_follow_up,
     fetch_failed_claims,
     get_claim_counts,
     mark_claim_failed,
@@ -56,6 +58,7 @@ def build_workers(
             fetch_failed_claims,
             notify_slack,
             get_claim_counts,
+            mark_claim_follow_up,
         ],
         # Activities are plain sync functions that use the sync SQLAlchemy session.
         activity_executor=executor,
@@ -63,7 +66,7 @@ def build_workers(
     payer = Worker(
         client,
         task_queue=PAYER_TASK_QUEUE,
-        activities=[submit_claim],
+        activities=[submit_claim, check_claim_decision],
         activity_executor=executor,
         # None means no limit.
         max_task_queue_activities_per_second=payer_rate_per_second or None,

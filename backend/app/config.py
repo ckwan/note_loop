@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,8 +73,40 @@ class Settings(BaseSettings):
     summary_cron: str = "0 9 * * *"
     summary_timezone: str = "America/Los_Angeles"
 
+    # "simulated" keeps the built in fake payer. "adjudication" hands the claim to the
+    # Claims Feedback Loop API and tracks the decision.
+    payer_mode: str = "simulated"
+    claims_api_url: str | None = None
+    claims_org_id: str | None = None
+    claims_http_timeout_seconds: float = 10.0
+    # Seconds between status checks, and the longest total wait before a person is asked
+    # to follow up. Polling only: the API has no webhook.
+    claims_poll_interval_seconds: float = 30.0
+    claims_poll_max_wait_seconds: float = 3600.0
+    # The claim has no amount of its own yet, so adjudication uses this one.
+    claim_default_amount: float = 150.0
+
     # Demo switch. The first N submit attempts fail, so you can watch Temporal retry.
     simulate_payer_failures: int = 0
+
+    @model_validator(mode="after")
+    def _check_payer_mode(self) -> "Settings":
+        if self.payer_mode not in ("simulated", "adjudication"):
+            raise ValueError(
+                f"PAYER_MODE must be 'simulated' or 'adjudication', got {self.payer_mode!r}"
+            )
+        if self.payer_mode == "adjudication":
+            missing = [
+                name
+                for name, value in (
+                    ("CLAIMS_API_URL", self.claims_api_url),
+                    ("CLAIMS_ORG_ID", self.claims_org_id),
+                )
+                if not (value or "").strip()
+            ]
+            if missing:
+                raise ValueError(f"PAYER_MODE=adjudication requires {', '.join(missing)}")
+        return self
 
 
 @lru_cache

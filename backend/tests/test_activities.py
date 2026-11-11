@@ -138,3 +138,64 @@ def test_reset_leaves_a_submitted_claim_alone(client):
 
     assert claim_for(note_id).status == "submitted"
     assert "claim_resubmit_requested" not in audit_actions(note_id)
+
+
+class _Recorder:
+    def __init__(self, fail=False):
+        self.sent = []
+        self.fail = fail
+
+    def send(self, notification):
+        if self.fail:
+            raise RuntimeError("slack is down")
+        self.sent.append(notification)
+
+
+def test_notify_slack_sends_and_links_to_the_workflow(client, monkeypatch):
+    from app.notify import messages
+    from app.workflows.activities import notify_slack
+
+    rec = _Recorder()
+    monkeypatch.setattr("app.workflows.activities.build_notifier", lambda settings: rec)
+
+    ActivityEnvironment().run(notify_slack, messages.claim_failed(4), "note-signed-4")
+
+    (sent,) = rec.sent
+    assert sent.link == "http://localhost:8233/namespaces/default/workflows/note-signed-4"
+    assert sent.link_text == "Open in Temporal"
+
+
+def test_notify_slack_raises_so_temporal_can_retry(client, monkeypatch):
+    from app.notify import messages
+    from app.workflows.activities import notify_slack
+
+    monkeypatch.setattr(
+        "app.workflows.activities.build_notifier", lambda settings: _Recorder(fail=True)
+    )
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(notify_slack, messages.claim_failed(4), None)
+
+
+def test_notify_slack_keeps_a_link_that_is_already_set(client, monkeypatch):
+    from app.notify.types import Notification
+    from app.workflows.activities import notify_slack
+
+    rec = _Recorder()
+    monkeypatch.setattr("app.workflows.activities.build_notifier", lambda settings: rec)
+
+    ActivityEnvironment().run(
+        notify_slack, Notification(title="t", link="https://example.com/x"), "wf-1"
+    )
+    assert rec.sent[0].link == "https://example.com/x"
+
+
+def test_get_claim_counts_reports_each_status(client):
+    from app.workflows.activities import get_claim_counts
+
+    create_failed_claims(3)
+    signed_note_id(client)  # one more claim, still pending
+
+    counts = ActivityEnvironment().run(get_claim_counts)
+    assert counts["failed"] == 3
+    assert counts["pending"] == 1
+    assert counts["submitted"] == 0

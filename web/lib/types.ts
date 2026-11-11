@@ -26,6 +26,9 @@ export type Note = {
   ai_draft: SoapNote | null;
   final_note: SoapNote | null;
   changed_sections: Section[];
+  edit_rate: number | null;
+  section_edit_rates: Partial<Record<Section, number>>;
+  draft_warnings: Finding[];
   signed_at: string | null;
 };
 
@@ -45,4 +48,114 @@ export type AuditEvent = {
   action: string;
   detail: Record<string, unknown>;
   created_at: string;
+};
+
+export type FindingKind =
+  | "not_documented"
+  | "ungrounded"
+  | "safety_undocumented"
+  | "inconsistent"
+  | "other";
+
+export const FINDING_LABELS: Record<FindingKind, string> = {
+  not_documented: "Nothing documented",
+  ungrounded: "Not supported by the session notes",
+  safety_undocumented: "Risk not documented",
+  inconsistent: "Does not follow from the other sections",
+  other: "Needs a look",
+};
+
+export type Finding = {
+  section: Section;
+  kind: FindingKind;
+  message: string;
+  source: string;
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  grounding: "grounding reviewer",
+  safety: "safety reviewer",
+  billing: "billing reviewer",
+  guardrail: "automatic check",
+  general: "reviewer",
+};
+
+/** "safety+guardrail" becomes "safety reviewer, automatic check". */
+export function sourceLabel(source: string): string {
+  return source
+    .split("+")
+    .map((part) => SOURCE_LABELS[part] ?? part)
+    .join(", ");
+}
+
+export type ReviewStatus = "paused" | "ready" | "needs_attention";
+export type ReviewDecision = "accept" | "dismiss";
+
+export type ReviewResult = {
+  status: ReviewStatus;
+  round: number;
+  // The note text after any accepted fixes. Not saved by the server.
+  note: SoapNote;
+  findings: Finding[];
+  fixes: Partial<Record<Section, string>>;
+};
+
+export type ReviewerRow = {
+  raised: number;
+  shared: number;
+  accepted: number;
+  dismissed: number;
+  rewritten: number;
+};
+
+export type AdminOverview = {
+  review: {
+    reviews_started: number;
+    review_rounds: number;
+    findings_merged_away: number;
+    signed_notes: number;
+    signed_without_review: number;
+    signed_with_open_findings: number;
+    by_reviewer: Record<string, ReviewerRow>;
+    by_kind: Record<string, number>;
+    recent: {
+      note_id: number;
+      at: string;
+      status: string | null;
+      findings: number;
+      sources: string[];
+    }[];
+  };
+  edits: {
+    signed_notes: number;
+    mean_edit_rate: number;
+    median_edit_rate: number;
+    signed_unchanged_share: number;
+    by_section: Record<string, number>;
+  };
+  claims: Record<ClaimStatusValue, number>;
+  llm: {
+    purpose: string;
+    calls: number;
+    errors: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    p50_seconds: number;
+    p95_seconds: number;
+  }[];
+  evals: {
+    provider: string;
+    model: string;
+    date: string;
+    summary: {
+      catch_specialists: [number, number];
+      catch_combined: [number, number];
+      false_alarms_specialists: [number, number];
+      unusable_replies: number;
+      seconds_per_case: number;
+      cases: number;
+    };
+  }[];
+  sections: Section[];
 };

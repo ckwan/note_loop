@@ -36,3 +36,14 @@ class BatchResult:
     processed: int
     succeeded: int
     failed: int
+
+
+@dataclass
+class DecisionCheck:
+    """Result of one status check. The timings come from the activity, so the workflow
+    never reads settings and stays deterministic."""
+
+    # not_applicable (simulated mode), pending, approved, or denied
+    state: str
+    poll_interval_seconds: float = 0.0
+    max_wait_seconds: float = 0.0

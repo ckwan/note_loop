@@ -1,12 +1,20 @@
 """Business logic for notes. Routes call these functions and nothing else."""
 
+import logging
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..errors import ConflictError, LLMOutputError, NotFoundError
+from ..edits import edit_stats, summarize
+from ..guardrails import check_note as guardrail_check
 from ..llm import LLMProvider, parse_soap_json, parse_suggestions
+from .. import metrics
 from ..models import AuditEvent, Claim, Note, TherapySession, utcnow
+from ..replies import describe_error
 from ..schemas import SECTIONS, ClaimSummary, NoteOut, SessionOut, SoapNote
+
+logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 2  # one try plus one retry on invalid model output
 
@@ -41,10 +49,16 @@ def changed_sections(note: Note) -> list[str]:
 
 
 def note_to_out(note: Note) -> NoteOut:
+    stats = edit_stats(note.ai_draft, note.final_note) if note.ai_draft and note.final_note else None
     return NoteOut(
+        edit_rate=stats["edit_rate"] if stats else None,
+        section_edit_rates=stats["section_edit_rates"] if stats else {},
         id=note.id,
         session_id=note.session_id,
         status=note.status,
+        draft_warnings=(
+            guardrail_check(note.raw_input, note.ai_draft) if note.ai_draft else []
+        ),
         ai_draft=SoapNote(**note.ai_draft) if note.ai_draft else None,
         final_note=SoapNote(**note.final_note) if note.final_note else None,
         changed_sections=changed_sections(note),
@@ -73,7 +87,13 @@ def _generate(call, parse, what: str):
             raise LLMOutputError("The LLM provider call failed") from exc
         try:
             return parse(text), attempt
-        except ValueError:
+        except ValueError as exc:
+            # Where and what kind of problem only. Never the reply, which may hold note text.
+            metrics.record_rejection(what)
+            logger.warning(
+                "model reply rejected: %s, attempt %d of %d, reason: %s",
+                what, attempt, MAX_ATTEMPTS, describe_error(exc),
+            )
             continue
     raise LLMOutputError(f"The model did not return a valid {what}")
 
@@ -98,7 +118,14 @@ def generate_draft(
     )
     db.add(note)
     db.flush()
-    _audit(db, note, _actor(session), "draft_generated", {"attempts": attempts})
+    flagged = guardrail_check(raw_input, soap.model_dump())
+    for f in flagged:
+        metrics.record_guardrail(f.kind)
+    detail: dict = {"attempts": attempts}
+    if flagged:
+        # Sections and kinds only. The message text may quote the note.
+        detail["guardrails"] = [{"section": f.section, "kind": f.kind} for f in flagged]
+    _audit(db, note, _actor(session), "draft_generated", detail)
     db.commit()
     return note
 
@@ -169,19 +196,30 @@ def sign_note(db: Session, session_id: int) -> Note:
     note.status = "signed"
     note.signed_at = utcnow()
     note.updated_at = note.signed_at
-    _audit(
-        db,
-        note,
-        _actor(note.session),
-        "signed",
-        {"edited_sections": changed_sections(note)},
-    )
+    detail: dict = {"edited_sections": changed_sections(note)}
+    if note.ai_draft and note.final_note:
+        # Numbers only. How much of the draft survived is the signal that matters.
+        stats = edit_stats(note.ai_draft, note.final_note)
+        detail.update(stats)
+        metrics.record_edit_rate(stats["edit_rate"], stats["section_edit_rates"])
+    _audit(db, note, _actor(note.session), "signed", detail)
     # Created in the same transaction as the signature. The Temporal workflow picks
     # it up next. If the workflow cannot start, the claim stays "pending" and is
     # visible, instead of the signature silently losing its follow up.
     db.add(Claim(note_id=note.id))
     db.commit()
     return note
+
+
+def edit_summary(db: Session, therapist_id: int | None = None) -> dict:
+    """How much therapists change drafts, across signed notes."""
+    stmt = select(Note).where(Note.status == "signed", Note.ai_draft.is_not(None))
+    if therapist_id is not None:
+        stmt = stmt.join(TherapySession, Note.session_id == TherapySession.id).where(
+            TherapySession.therapist_id == therapist_id
+        )
+    notes = db.execute(stmt).scalars()
+    return summarize([(n.ai_draft, n.final_note) for n in notes if n.final_note])
 
 
 def get_claim(db: Session, session_id: int) -> Claim:
