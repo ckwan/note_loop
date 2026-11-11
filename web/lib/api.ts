@@ -106,6 +106,9 @@ export async function getClaim(sessionId: number): Promise<Claim | null> {
   }
 }
 
+export const resubmitClaim = (sessionId: number) =>
+  request<Claim>(`/sessions/${sessionId}/claim/resubmit`, { method: "POST" });
+
 export const getAudit = (sessionId: number) =>
   request<AuditEvent[]>(`/sessions/${sessionId}/note/audit`);
 

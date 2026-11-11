@@ -17,6 +17,7 @@ from app.workflows.activities import (
     mark_claim_failed,
     notify_slack,
     prepare_claim,
+    reset_claim_for_resubmit,
     reset_failed_claim,
     submit_claim,
 )
@@ -26,6 +27,7 @@ from app.workflows.workflows import (
     NoteSignedWorkflow,
     ResubmitClaimWorkflow,
     ResubmitFailedClaimsWorkflow,
+    ResubmitSingleClaimWorkflow,
 )
 
 logger = logging.getLogger("noteloop.worker")
@@ -50,6 +52,7 @@ def build_workers(
             NoteSignedWorkflow,
             ResubmitClaimWorkflow,
             ResubmitFailedClaimsWorkflow,
+            ResubmitSingleClaimWorkflow,
             DailySummaryWorkflow,
         ],
         activities=[
@@ -61,6 +64,7 @@ def build_workers(
             get_claim_counts,
             mark_claim_follow_up,
             notify_claim_event,
+            reset_claim_for_resubmit,
         ],
         # Activities are plain sync functions that use the sync SQLAlchemy session.
         activity_executor=executor,

@@ -316,3 +316,82 @@ def test_simulated_mode_sends_only_the_submitted_event(client, monkeypatch):
     run_workflow(NoteSignedWorkflow.run, note_id, f"test-{note_id}")
 
     assert titles(rec) == ["Claim submitted"]
+
+
+# --- resubmit one claim -----------------------------------------------------------
+
+def set_claim_status(note_id: int, status: str) -> None:
+    with SessionLocal() as db:
+        db.query(Claim).filter_by(note_id=note_id).one().status = status
+        db.commit()
+
+
+@pytest.mark.parametrize("status", ["failed", "denied"])
+def test_resubmit_endpoint_starts_a_workflow_for_failed_and_denied(client, starter, status):
+    note_id = signed_note_id(client)
+    set_claim_status(note_id, status)
+
+    res = client.post("/sessions/1/claim/resubmit")
+
+    assert res.status_code == 202
+    assert starter.resubmitted == [res.json()["id"]]
+
+
+@pytest.mark.parametrize("status", ["pending", "created", "submitted", "approved"])
+def test_resubmit_endpoint_refuses_other_statuses(client, starter, status):
+    note_id = signed_note_id(client)
+    set_claim_status(note_id, status)
+
+    assert client.post("/sessions/1/claim/resubmit").status_code == 409
+    assert starter.resubmitted == []
+
+
+def test_resubmit_endpoint_404_without_a_claim(client):
+    assert client.post("/sessions/1/claim/resubmit").status_code == 404
+
+
+def test_reset_for_resubmit_is_repeatable_and_a_denial_gets_a_new_attempt(client, api):
+    from app.workflows.activities import reset_claim_for_resubmit
+
+    note_id, claim_id = new_claim(client)
+    ActivityEnvironment().run(submit_claim, claim_id)
+    api.statuses = ["denied"]
+    ActivityEnvironment().run(check_claim_decision, claim_id)
+    env = ActivityEnvironment()
+
+    env.run(reset_claim_for_resubmit, claim_id)
+    env.run(reset_claim_for_resubmit, claim_id)
+
+    claim = claim_for(note_id)
+    assert (claim.status, claim.submission_attempt, claim.remote_claim_id) == ("created", 1, None)
+    assert audit_actions(note_id).count("claim_resubmit_requested") == 1
+
+
+def test_denied_claim_resubmitted_gets_a_new_external_ref_and_is_decided(client, api, monkeypatch):
+    from app.workflows.workflows import ResubmitSingleClaimWorkflow
+    from app.workflows.types import ClaimRef
+
+    api.statuses = ["denied"]
+    note_id = signed_note_id(client)
+    run_workflow(NoteSignedWorkflow.run, note_id, f"test-{note_id}")
+    assert claim_for(note_id).status == "denied"
+    claim_id = claim_for(note_id).id
+
+    api.statuses = ["approved"]
+    run_workflow(ResubmitSingleClaimWorkflow.run, ClaimRef(claim_id, note_id), f"re-{claim_id}")
+
+    assert claim_for(note_id).status == "approved"
+    assert sorted(api.claims) == [str(note_id), f"{note_id}-1"]
+
+
+def test_failed_claim_resubmitted_reuses_the_same_external_ref(client, api):
+    from app.workflows.workflows import ResubmitSingleClaimWorkflow
+    from app.workflows.types import ClaimRef
+
+    note_id, claim_id = new_claim(client)
+    set_claim_status(note_id, "failed")
+
+    run_workflow(ResubmitSingleClaimWorkflow.run, ClaimRef(claim_id, note_id), f"re-{claim_id}")
+
+    assert list(api.claims) == [str(note_id)]
+    assert claim_for(note_id).status == "approved"

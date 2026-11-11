@@ -93,6 +93,8 @@ class ClaimOut(BaseModel):
     status: str
     payer_reference: str | None
     submitted_at: datetime | None
+    # What the adjudication service last said. None in simulated mode.
+    remote_status: str | None = None
 
 
 class ResubmitRequest(BaseModel):

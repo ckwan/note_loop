@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from . import alerts, metrics
 from .config import get_settings
 from .db import get_db
-from .errors import NotFoundError
+from .errors import ConflictError, NotFoundError
 from .idempotency import sign_once
 from .llm import LLMProvider, build_provider
 from .models import TherapySession
@@ -277,6 +277,28 @@ def get_claim(session_id: int, db: Session = Depends(get_db)):
         status=claim.status,
         payer_reference=claim.payer_reference,
         submitted_at=claim.submitted_at,
+        remote_status=claim.remote_status,
+    )
+
+
+@router.post("/sessions/{session_id}/claim/resubmit", response_model=ClaimOut, status_code=202)
+async def resubmit_claim(
+    session_id: int,
+    db: Session = Depends(get_db),
+    starter: WorkflowStarter = Depends(get_workflow_starter),
+):
+    """Send one failed or denied claim again. Returns right away; the claim then moves on."""
+    claim = svc.get_claim(db, session_id)
+    if claim.status not in ("failed", "denied"):
+        raise ConflictError(f"A {claim.status} claim cannot be resubmitted")
+    await starter.start_resubmit_claim(claim.id, claim.note_id)
+    return ClaimOut(
+        id=claim.id,
+        note_id=claim.note_id,
+        status=claim.status,
+        payer_reference=claim.payer_reference,
+        submitted_at=claim.submitted_at,
+        remote_status=claim.remote_status,
     )
 
 

@@ -19,10 +19,14 @@ def opaque_patient_ref(org_id: str, patient_id: int) -> str:
     return f"pt_{digest[:16]}"
 
 
-def build_payload(org_id: str, note_id: int, patient_id: int, amount: float) -> dict:
+def external_ref_for(note_id: int, attempt: int) -> str:
+    return str(note_id) if attempt == 0 else f"{note_id}-{attempt}"
+
+
+def build_payload(org_id: str, external_ref: str, patient_id: int, amount: float) -> dict:
     return {
         "org_id": org_id,
-        "external_ref": str(note_id),
+        "external_ref": external_ref,
         "claimant_name": opaque_patient_ref(org_id, patient_id),
         "amount": amount,
         "history_notes": HISTORY_NOTES,

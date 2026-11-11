@@ -13,7 +13,7 @@ from app.db import SessionLocal
 from app.models import AuditEvent, Claim, Note, utcnow
 from app.notify.notifier import build_notifier
 from app.notify.types import Notification
-from app.payer.claims_api import build_claims_client, build_payload
+from app.payer.claims_api import build_claims_client, build_payload, external_ref_for
 from app.services import notes as notes_service
 from app.workflows.types import ClaimRef, DecisionCheck
 
@@ -94,7 +94,10 @@ def _submit_to_adjudication(claim_id: int, attempt: int) -> str:
         amount = float(claim.amount) if claim.amount is not None else settings.claim_default_amount
         # Only ids are read here. No note text, session notes, or patient name.
         payload = build_payload(
-            settings.claims_org_id or "", claim.note_id, note.session.patient_id, amount
+            settings.claims_org_id or "",
+            external_ref_for(claim.note_id, claim.submission_attempt),
+            note.session.patient_id,
+            amount,
         )
         note_id = claim.note_id
 
@@ -217,6 +220,38 @@ def reset_failed_claim(claim_id: int) -> int:
             claim.status = "created"
             claim.updated_at = utcnow()
             _audit(db, claim.note_id, "claim_resubmit_requested", {"claim_id": claim.id})
+        db.commit()
+        return claim.id
+
+
+@activity.defn
+def reset_claim_for_resubmit(claim_id: int) -> int:
+    """Move a failed or denied claim back to created so it can be sent again.
+
+    A denied claim also gets a new submission attempt, which gives it a new external
+    reference. Safe to repeat: once the claim is created, a second call changes nothing.
+    """
+    with SessionLocal() as db:
+        claim = db.get(Claim, claim_id)
+        if claim is None:
+            raise ApplicationError(f"Claim {claim_id} not found", non_retryable=True)
+
+        if claim.status in ("failed", "denied"):
+            previous = claim.status
+            if previous == "denied":
+                claim.submission_attempt += 1
+                claim.remote_claim_id = None
+                claim.remote_status = None
+                claim.payer_reference = None
+                claim.submitted_at = None
+            claim.status = "created"
+            claim.updated_at = utcnow()
+            _audit(
+                db,
+                claim.note_id,
+                "claim_resubmit_requested",
+                {"claim_id": claim.id, "from": previous, "attempt": claim.submission_attempt},
+            )
         db.commit()
         return claim.id
 

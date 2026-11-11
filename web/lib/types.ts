@@ -32,7 +32,14 @@ export type Note = {
   signed_at: string | null;
 };
 
-export type ClaimStatusValue = "pending" | "created" | "submitted" | "failed";
+export type ClaimStatusValue =
+  | "pending"
+  | "created"
+  | "submitted"
+  | "failed"
+  | "approved"
+  | "denied"
+  | "manual_follow_up";
 
 export type Claim = {
   id: number;
@@ -40,6 +47,8 @@ export type Claim = {
   status: ClaimStatusValue;
   payer_reference: string | null;
   submitted_at: string | null;
+  // What the adjudication service last said. Null when the payer is simulated.
+  remote_status: string | null;
 };
 
 export type AuditEvent = {

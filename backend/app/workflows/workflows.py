@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
         mark_claim_failed,
         notify_slack,
         prepare_claim,
+        reset_claim_for_resubmit,
         reset_failed_claim,
         submit_claim,
     )
@@ -190,6 +191,44 @@ class ResubmitClaimWorkflow:
                 retry_policy=RETRY,
             )
             raise
+
+
+@workflow.defn
+class ResubmitSingleClaimWorkflow:
+    """A person asked to send one failed or denied claim again.
+
+    Unlike the batch child, this waits for the decision, because the person is watching.
+    """
+
+    @workflow.run
+    async def run(self, ref: ClaimRef) -> str:
+        try:
+            await workflow.execute_activity(
+                reset_claim_for_resubmit,
+                ref.claim_id,
+                start_to_close_timeout=TIMEOUT,
+                retry_policy=RETRY,
+            )
+            reference = await workflow.execute_activity(
+                submit_claim,
+                ref.claim_id,
+                task_queue=PAYER_TASK_QUEUE,
+                start_to_close_timeout=TIMEOUT,
+                retry_policy=RETRY,
+            )
+        except ActivityError:
+            await workflow.execute_activity(
+                mark_claim_failed,
+                ref.note_id,
+                start_to_close_timeout=TIMEOUT,
+                retry_policy=RETRY,
+            )
+            await _notify(messages.claim_failed(ref.note_id))
+            raise
+
+        await _notify_event(messages.claim_submitted(ref.note_id, ref.claim_id))
+        await _track_decision(ref.claim_id, ref.note_id)
+        return reference
 
 
 @workflow.defn

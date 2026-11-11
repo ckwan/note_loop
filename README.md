@@ -235,6 +235,8 @@ CLAIMS_POLL_INTERVAL_SECONDS=30
 
 **Privacy rule.** The request carries no note text, no session notes, and no patient name. `claimant_name` is an opaque reference (a hash of the org id and the patient id), `history_notes` is the fixed text "Outpatient session claim", and the payload builder only receives ids and the amount. A test checks the outgoing request for note content, session notes, and the patient's name.
 
+**Resubmitting.** A failed claim is sent again with the same `external_ref` (the note id), so it cannot become a duplicate. A denied claim is sent with a new one, `<note_id>-<attempt>`, because the API returns a repeated reference unchanged and would hand back the denial. The attempt number is stored on the claim, and the new claim is tracked to a decision like the first. The signed note is never reopened.
+
 **Tracking the decision.** After submit, the workflow checks the status, sleeps with `workflow.sleep`, and checks again until the decision is final or the maximum wait passes. Every change of remote status is written to the audit trail. `approved` and `denied` become claim statuses. A timeout, or a status check that keeps failing, moves the claim to `manual_follow_up` and does not fail the workflow. Slack gets a message for a denied claim and for a follow up, with ids and statuses only. The step is behind `workflow.patched("claim-decision-tracking")`, so workflows already running keep their old history.
 
 ### Try the batch resubmit
@@ -327,7 +329,7 @@ Slack is a monitoring channel for whoever runs the system. It is not part of the
 2. Put the URL in `.env` as `SLACK_WEBHOOK_URL=...` and restart the api and worker. Treat the URL as a secret. With no URL set, nothing is sent.
 3. Create the daily summary schedule once: `docker compose exec worker python -m app.schedules`
 
-Messages are sent for a claim that fails after all its retries, a batch resubmit starting and finishing (with counts), a review that ends with open findings, a claim denied by the adjudication service, a claim moved to manual follow up, and a daily summary of claims by status. A successful claim sends nothing, so a batch of 10,000 does not flood the channel. Each Temporal message links to its workflow in the Temporal UI.
+Messages are sent for a claim that fails after all its retries, a batch resubmit starting and finishing (with counts), a review that ends with open findings, a claim denied by the adjudication service, a claim moved to manual follow up, and a daily summary of claims by status. A successful claim sends nothing by default, so a batch of 10,000 does not flood the channel. Set `SLACK_NOTIFY_CLAIM_EVENTS=true` to also get "Claim submitted" when a signed note's claim is submitted and "Claim approved" when the adjudication service approves it (ids and statuses only). Both steps are behind `workflow.patched`. Each Temporal message links to its workflow in the Temporal UI.
 
 A message never contains a patient name or any note text. Only ids, statuses, and counts. A failed Slack call is retried a few times and then dropped. It never fails a claim, a batch, or a review.
 
@@ -357,7 +359,7 @@ The suite covers the note flow, adjudication mode against a mocked Claims API (n
 * Adjudication mode polls for the decision. The Claims API has no webhook, so a decision can arrive up to one poll interval late, and a claim still undecided after the maximum wait needs a person (`manual_follow_up`). The batch resubmit does not poll, so a resubmitted claim stays `submitted` in this mode.
 * Tables are created at startup, so an existing database needs the new `claims` columns (`amount`, `remote_claim_id`, `remote_status`) added by hand. `/claims/summary` still reports only the original four statuses.
 * The Temporal dev server in Docker Compose keeps history in memory, so restarting it clears workflow history.
-* The batch resubmit has an API endpoint but no button in the UI.
+* The batch resubmit has an API endpoint but no button in the UI. A single failed or denied claim has a "Resubmit claim" button on the signed note, backed by `POST /sessions/{id}/claim/resubmit`. A claim in `manual_follow_up` has no button yet.
 * Wording suggestions and the review have not been evaluated on a real model with clinician review. With the stub provider, the review is a set of simple rules and not real analysis. It is not a clinical safety control.
 * Slack messages have only been tested against a mock server. The first real webhook may need small formatting changes.
 * The review runs in the API process. The decision tracking step uses `workflow.patched`. Any further step added to a running workflow needs the same.

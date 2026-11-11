@@ -5,8 +5,12 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from app.config import get_settings
 from app.errors import ConflictError, UnavailableError
 from app.workflows.client import get_client
-from app.workflows.types import BATCH_WORKFLOW_ID, BatchParams
-from app.workflows.workflows import NoteSignedWorkflow, ResubmitFailedClaimsWorkflow
+from app.workflows.types import BATCH_WORKFLOW_ID, BatchParams, ClaimRef
+from app.workflows.workflows import (
+    NoteSignedWorkflow,
+    ResubmitFailedClaimsWorkflow,
+    ResubmitSingleClaimWorkflow,
+)
 
 
 class WorkflowStarter(Protocol):
@@ -14,6 +18,10 @@ class WorkflowStarter(Protocol):
 
     async def start_resubmit_failed(self, chunk_size: int) -> str:
         """Start the batch workflow. Returns its workflow id."""
+        ...
+
+    async def start_resubmit_claim(self, claim_id: int, note_id: int) -> str:
+        """Start a resubmit for one claim. Returns its workflow id."""
         ...
 
 
@@ -24,6 +32,9 @@ class NoopStarter:
         return None
 
     async def start_resubmit_failed(self, chunk_size: int) -> str:
+        raise UnavailableError("Temporal is turned off (TEMPORAL_ENABLED=false)")
+
+    async def start_resubmit_claim(self, claim_id: int, note_id: int) -> str:
         raise UnavailableError("Temporal is turned off (TEMPORAL_ENABLED=false)")
 
 
@@ -57,3 +68,21 @@ class TemporalStarter:
         except WorkflowAlreadyStartedError as exc:
             raise ConflictError("A resubmit batch is already running") from exc
         return BATCH_WORKFLOW_ID
+
+    async def start_resubmit_claim(self, claim_id: int, note_id: int) -> str:
+        try:
+            client = await get_client()
+        except Exception as exc:
+            raise UnavailableError("Could not reach Temporal") from exc
+        workflow_id = f"resubmit-claim-{claim_id}"
+        try:
+            # One id per claim, so a double click cannot send the claim twice at once.
+            await client.start_workflow(
+                ResubmitSingleClaimWorkflow.run,
+                ClaimRef(claim_id=claim_id, note_id=note_id),
+                id=workflow_id,
+                task_queue=get_settings().temporal_task_queue,
+            )
+        except WorkflowAlreadyStartedError as exc:
+            raise ConflictError("This claim is already being resubmitted") from exc
+        return workflow_id
