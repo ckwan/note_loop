@@ -35,6 +35,8 @@ class TherapySession(Base):
     therapist_id: Mapped[int] = mapped_column(ForeignKey("therapists.id"), index=True)
     patient_id: Mapped[int] = mapped_column(ForeignKey("patients.id"))
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Used to price the claim.
+    duration_minutes: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
 
     patient: Mapped[Patient] = relationship()
     note: Mapped["Note | None"] = relationship(back_populates="session", uselist=False)

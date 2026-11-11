@@ -216,7 +216,7 @@ I also wanted to build the whole stack myself, with the schema at one end and th
 | `CLAIMS_HTTP_TIMEOUT_SECONDS` | Per request timeout, default 10 |
 | `CLAIMS_POLL_INTERVAL_SECONDS` | Wait between status checks, default 30 |
 | `CLAIMS_POLL_MAX_WAIT_SECONDS` | Longest total wait for a decision, default 3600 |
-| `CLAIM_DEFAULT_AMOUNT` | Claims have no amount of their own yet, so this is sent |
+| `CLAIM_RATE_PER_HOUR` | Hourly rate, default 180. A claim's `amount` is this times the session's `duration_minutes` (default 50, so 150.00) |
 
 To turn it on, put the variables in `.env` and restart the api and worker (both read `.env`):
 
@@ -233,7 +233,7 @@ CLAIMS_POLL_INTERVAL_SECONDS=30
 * 5xx responses and timeouts are retried with the normal retry policy. Any other 4xx fails the claim without retrying.
 * The call runs on the rate limited payer queue, like the simulated one.
 
-**Privacy rule.** The request carries no note text, no session notes, and no patient name. `claimant_name` is an opaque reference (a hash of the org id and the patient id), `history_notes` is the fixed text "Outpatient session claim", and the payload builder only receives ids and the amount. A test checks the outgoing request for note content, session notes, and the patient's name.
+**Privacy rule.** The request carries no note text, no session notes, and no patient name. `claimant_name` is an opaque reference (a hash of the org id and the patient id), `history_notes` is built from the session length and the submission attempt only, such as "Outpatient session claim, 50 minutes" (no dates, because a date of service is an identifier), and the payload builder only receives ids and the amount. A test checks the outgoing request for note content, session notes, and the patient's name.
 
 **Resubmitting.** A failed claim is sent again with the same `external_ref` (the note id), so it cannot become a duplicate. A denied claim is sent with a new one, `<note_id>-<attempt>`, because the API returns a repeated reference unchanged and would hand back the denial. The attempt number is stored on the claim, and the new claim is tracked to a decision like the first. The signed note is never reopened.
 

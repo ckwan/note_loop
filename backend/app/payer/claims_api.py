@@ -11,7 +11,6 @@ from temporalio.exceptions import ApplicationError
 
 from app.config import Settings
 
-HISTORY_NOTES = "Outpatient session claim"
 
 
 def opaque_patient_ref(org_id: str, patient_id: int) -> str:
@@ -23,13 +22,25 @@ def external_ref_for(note_id: int, attempt: int) -> str:
     return str(note_id) if attempt == 0 else f"{note_id}-{attempt}"
 
 
-def build_payload(org_id: str, external_ref: str, patient_id: int, amount: float) -> dict:
+def claim_amount(duration_minutes: int, rate_per_hour: float) -> float:
+    return round(rate_per_hour * duration_minutes / 60, 2)
+
+
+def history_notes_for(duration_minutes: int, attempt: int) -> str:
+    """Non clinical. No dates (a date of service is an identifier) and no note content."""
+    text = f"Outpatient session claim, {duration_minutes} minutes"
+    return text if attempt == 0 else f"{text}, resubmission {attempt}"
+
+
+def build_payload(
+    org_id: str, external_ref: str, patient_id: int, amount: float, history_notes: str
+) -> dict:
     return {
         "org_id": org_id,
         "external_ref": external_ref,
         "claimant_name": opaque_patient_ref(org_id, patient_id),
         "amount": amount,
-        "history_notes": HISTORY_NOTES,
+        "history_notes": history_notes,
     }
 
 

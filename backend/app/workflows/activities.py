@@ -13,7 +13,13 @@ from app.db import SessionLocal
 from app.models import AuditEvent, Claim, Note, utcnow
 from app.notify.notifier import build_notifier
 from app.notify.types import Notification
-from app.payer.claims_api import build_claims_client, build_payload, external_ref_for
+from app.payer.claims_api import (
+    build_claims_client,
+    build_payload,
+    claim_amount,
+    external_ref_for,
+    history_notes_for,
+)
 from app.services import notes as notes_service
 from app.workflows.types import ClaimRef, DecisionCheck
 
@@ -91,13 +97,20 @@ def _submit_to_adjudication(claim_id: int, attempt: int) -> str:
             return claim.payer_reference or ""
 
         note = db.get(Note, claim.note_id)
-        amount = float(claim.amount) if claim.amount is not None else settings.claim_default_amount
-        # Only ids are read here. No note text, session notes, or patient name.
+        duration = note.session.duration_minutes
+        amount = (
+            float(claim.amount)
+            if claim.amount is not None
+            else claim_amount(duration, settings.claim_rate_per_hour)
+        )
+        # Only ids and the session length are read here. No note text, session notes,
+        # dates, or patient name.
         payload = build_payload(
             settings.claims_org_id or "",
             external_ref_for(claim.note_id, claim.submission_attempt),
             note.session.patient_id,
             amount,
+            history_notes_for(duration, claim.submission_attempt),
         )
         note_id = claim.note_id
 

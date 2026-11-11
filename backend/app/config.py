@@ -86,8 +86,8 @@ class Settings(BaseSettings):
     # to follow up. Polling only: the API has no webhook.
     claims_poll_interval_seconds: float = 30.0
     claims_poll_max_wait_seconds: float = 3600.0
-    # The claim has no amount of its own yet, so adjudication uses this one.
-    claim_default_amount: float = 150.0
+    # A claim's amount is the session length times this hourly rate.
+    claim_rate_per_hour: float = 180.0
 
     # Demo switch. The first N submit attempts fail, so you can watch Temporal retry.
     simulate_payer_failures: int = 0

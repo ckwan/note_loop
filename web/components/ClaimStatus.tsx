@@ -18,8 +18,11 @@ const LABELS = {
   manual_follow_up: { text: "Needs follow up", variant: "warning" },
 } as const satisfies Record<ClaimStatusValue, { text: string; variant: string }>;
 
-const POLL_MS = 2000;
-const MAX_POLLS = 30;
+// Fast while the claim is still being created, slow while it waits for a decision.
+const FAST_POLL_MS = 2000;
+const MAX_FAST_POLLS = 30;
+const SLOW_POLL_MS = 20000;
+const MAX_SLOW_POLLS = 30;
 
 const RESUBMITTABLE: ClaimStatusValue[] = ["failed", "denied"];
 
@@ -45,29 +48,46 @@ export default function ClaimStatus({ sessionId, onSettled }: Props) {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let polls = 0;
+    let fastPolls = 0;
+    let slowPolls = 0;
+    let firstOfRun = true;
 
     async function poll() {
-      polls += 1;
+      // Nobody is looking at a hidden tab. Check again when it comes back.
+      if (document.hidden) {
+        timer = setTimeout(poll, SLOW_POLL_MS);
+        return;
+      }
+      const first = firstOfRun;
+      firstOfRun = false;
+      let waiting = false;
       try {
         const next = await getClaim(sessionId);
         if (cancelled) return;
         setClaim(next);
         // After a resubmit the old failed or denied status can still be on the server
         // for a moment, so the first polls of a run never count as settled.
-        if (next && isSettled(next) && (run === 0 || polls > 1)) {
+        if (next && isSettled(next) && (run === 0 || !first)) {
           onSettled();
           return;
         }
+        waiting = next !== null && next.status === "submitted";
       } catch {
         // Keep polling. A brief API error should not stop the status updating.
       }
       if (cancelled) return;
-      if (polls >= MAX_POLLS) {
+      if (waiting) {
+        slowPolls += 1;
+        if (slowPolls >= MAX_SLOW_POLLS) return;
+        timer = setTimeout(poll, SLOW_POLL_MS);
+        return;
+      }
+      fastPolls += 1;
+      if (fastPolls >= MAX_FAST_POLLS) {
         setStalled(true);
         return;
       }
-      timer = setTimeout(poll, POLL_MS);
+      timer = setTimeout(poll, FAST_POLL_MS);
     }
 
     poll();

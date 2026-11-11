@@ -200,7 +200,7 @@ def test_the_outgoing_request_has_no_note_text_session_notes_or_patient_name(cli
                        *patient_name.split()):
             assert secret.lower() not in wire
     body = json.loads(api.posts()[0].content)
-    assert body["history_notes"] == "Outpatient session claim"
+    assert body["history_notes"] == "Outpatient session claim, 50 minutes"
     assert body["claimant_name"].startswith("pt_")
 
 
@@ -395,3 +395,30 @@ def test_failed_claim_resubmitted_reuses_the_same_external_ref(client, api):
 
     assert list(api.claims) == [str(note_id)]
     assert claim_for(note_id).status == "approved"
+
+
+# --- dynamic payload fields ---------------------------------------------------------
+
+def test_amount_and_history_notes_come_from_the_session(client, api, monkeypatch):
+    from app.models import TherapySession
+
+    monkeypatch.setattr(get_settings(), "claim_rate_per_hour", 120.0)
+    note_id = signed_note_id(client)
+    with SessionLocal() as db:
+        db.get(TherapySession, 1).duration_minutes = 30
+        db.commit()
+    claim_id = ActivityEnvironment().run(prepare_claim, note_id)
+
+    ActivityEnvironment().run(submit_claim, claim_id)
+
+    body = json.loads(api.posts()[0].content)
+    assert body["amount"] == 60.0
+    assert body["history_notes"] == "Outpatient session claim, 30 minutes"
+    assert float(claim_for(note_id).amount) == 60.0
+
+
+def test_a_resubmitted_denial_says_so_in_history_notes():
+    from app.payer.claims_api import history_notes_for
+
+    assert history_notes_for(50, 0) == "Outpatient session claim, 50 minutes"
+    assert history_notes_for(50, 2) == "Outpatient session claim, 50 minutes, resubmission 2"
