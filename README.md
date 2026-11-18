@@ -35,7 +35,7 @@ Click any image to open it full size.
 <table>
   <tr>
     <td align="center">
-      <a href="images/01_schedule.png"><img src="images/01_schedule.png" width="280" alt="Session schedule"></a>
+      <a href="images/dashboard_1.png"><img src="images/dashboard_1.png" width="280" alt="Session schedule"></a>
       <br><sub>Schedule</sub>
     </td>
     <td align="center">
