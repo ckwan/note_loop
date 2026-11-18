@@ -83,7 +83,7 @@ flowchart LR
         T --> W2["Worker<br/>payer queue, rate limited"]
     end
     subgraph Outside["Outside services"]
-        LLM["LLM provider<br/>Ollama, Bedrock, Anthropic, or stub"]
+        LLM["LLM provider<br/>Ollama, Bedrock, or stub"]
         SL["Slack<br/>incoming webhook"]
     end
     UI -->|"/api proxy"| R
@@ -156,10 +156,5 @@ The suite covers the note flow, validation and retry of model output, wording su
 2. A setting that requires a review before signing, and more specialist reviewers added the same way, such as a coding reviewer. Reviewers could also call tools, such as looking up the previous session, which would move the review from a fixed workflow toward an agent.
 3. Feed accepted and rejected suggestions back to the model as examples.
 4. Authentication, role based access control, and Postgres row level security.
-5. Alembic migrations, and a Temporal setup with persistent storage.
-6. A Grafana dashboard on `/metrics`, and a per model price table instead of one price pair.
-7. Real claim generation and status tracking, with a payer acknowledgment signal and a timeout that moves a claim to manual review.
-8. A UI for the batch resubmit with live progress, and a Slack button that starts it. The button needs Slack interactivity, request signature checks, and an allow list of users.
-9. Error tracking through Sentry.
-10. Streaming drafts to the browser.
-11. More note formats (DAP, BIRP) and treatment plans.
+5. A UI for the batch resubmit with live progress, and a Slack button that starts it. The button needs Slack interactivity, request signature checks, and an allow list of users.
+6. More note formats (DAP, BIRP) and treatment plans.
