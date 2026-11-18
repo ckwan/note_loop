@@ -56,6 +56,10 @@ Click any image to open it full size.
       <a href="images/temporal_6.png"><img src="images/temporal_6.png" width="280" alt="Claim workflow in the Temporal UI"></a>
       <br><sub>Claim workflow in Temporal</sub>
     </td>
+    <td align="center">
+      <a href="images/slack_notification_7.png"><img src="images/slack_notification_7.png" width="280" alt="Claim workflow in the Temporal UI"></a>
+      <br><sub>Slack Notification</sub>
+    </td>
   </tr>
 </table>
 
