@@ -1,18 +1,32 @@
 # NoteLoop
 
-An AI assisted progress note tool for therapists. The AI drafts a SOAP note from rough session notes, the therapist edits it, asks for better wording where needed, and signs it. Signing starts a durable background workflow that creates and submits an insurance claim.
+NoteLoop uses an LLM to turn a therapist's rough, unstructured session notes into a structured SOAP note (Subjective, Objective, Assessment, Plan). The therapist reviews, edits, and signs the draft. A review step checks the note before signing, and signing starts a background workflow that submits an insurance claim.
 
 Status: portfolio project. Demo video: [link]. All data in this repo is synthetic, and the payer is simulated.
 
 ## What it does
 
+The core step is turning free text into a structured note. For example, rough notes like this (a synthetic case from the evals):
+
+> Client's mother died in March. Crying through the session and not eating well. Discussed a grief support group. Plan is a referral and weekly sessions.
+
+become a SOAP note like this (an illustrative reference note, not captured model output):
+
+| Section | Text |
+| --- | --- |
+| Subjective | Client's mother died in March. Client has trouble eating. |
+| Objective | Client cried through most of the session. |
+| Assessment | Grief reaction after her mother's death. |
+| Plan | Refer to a grief support group and continue weekly sessions. |
+
+The model's reply is validated against a schema, and guardrails flag anything the notes do not support. The full flow:
+
 1. A therapist opens a session from the schedule and pastes rough notes.
 2. The API asks an LLM for a SOAP note (Subjective, Objective, Assessment, Plan) and validates the reply against a schema before saving it.
 3. The therapist edits any section. A section reduced to short phrases can be sent back for a more formal rewrite. The suggestion appears as a diff, and nothing changes until the therapist accepts it.
-4. Before signing, the therapist can run a review. A LangGraph workflow runs three specialist reviewers in parallel, for grounding, safety, and billing readiness. A supervisor merges what they find with the rule based checks, so the note is checked for empty sections, facts the notes do not support, and risk language that was never documented, and each problem shows which reviewer raised it. It proposes fixes, pauses for the therapist to accept, dismiss, or rewrite each one, and checks again, for up to two rounds. The review only returns proposed text. It never changes the saved note. In the web app it is a panel above the editor. For each flagged section the therapist uses the proposed fix, keeps the text as written, or rewrites it. Accepted fixes land in the editor, marked AI assisted in the audit trail, and are saved like any other edit. A paused review is restored after a reload if the text it checked was saved.
+4. Before signing, the therapist can run a review. A LangGraph workflow runs three specialist reviewers in parallel (grounding, safety, billing readiness), and a supervisor merges their findings with rule based checks. It proposes fixes and pauses for the therapist to accept, dismiss, or rewrite each one, for up to two rounds. The review only returns proposed text and never changes the saved note.
 5. A compare view shows the AI draft against the final text, word by word.
-6. Signing locks the note, writes an audit event, and starts a Temporal workflow that creates a claim and submits it to a simulated payer, with retries.
-7. A batch workflow can resubmit every failed claim in chunks, at a controlled rate.
+6. Signing locks the note, writes an audit event, and starts a Temporal workflow that creates and submits a claim to a simulated payer. A batch workflow can resubmit failed claims.
 
 ## Screenshots
 
@@ -81,92 +95,7 @@ flowchart LR
 
 Two kinds of workflow run side by side. LangGraph runs the review before signing, inside the API, and pauses for the therapist. Temporal runs everything after signing, in separate workers.
 
-### The AI layer
-
-Every model call goes through the same path, whichever model is behind it. The evals run that same path offline, on invented cases, so a change can be scored before it ships.
-
-```mermaid
-flowchart TB
-    subgraph Live["Live, on every request"]
-        IN["Session notes<br/>untrusted text"] --> G1["Input guardrails<br/>size limit, strip control characters,<br/>neutralize prompt tags"]
-        G1 --> P["Provider interface<br/>Ollama, Bedrock, Anthropic, or stub"]
-        P --> V["Output validation<br/>Pydantic reply models,<br/>one retry, 502"]
-        V --> G2["Output guardrails<br/>grounding, safety mention,<br/>injection warning"]
-        G2 --> H["Therapist reviews,<br/>edits, and signs"]
-        subgraph RV["LangGraph review, three reviewers in parallel"]
-            R1["Grounding<br/>reviewer"]
-            R2["Safety<br/>reviewer"]
-            R3["Billing<br/>reviewer"]
-        end
-        RV --> P
-        RV --> SUP["Supervisor<br/>merge, remove duplicates,<br/>safety first"]
-        G2 -->|"rule findings"| SUP
-        SUP --> FX["Fixer<br/>text only for<br/>flagged sections"]
-        FX --> H
-    end
-    P -.-> LS["LangSmith traces<br/>names and timings, no note text"]
-    P -.-> OBS["Metrics and alerts<br/>tokens, cost, latency,<br/>Slack on budget or failures"]
-    subgraph Offline["Offline, before shipping a change"]
-        C["Synthetic cases<br/>drafts and planted problems"] --> E["Eval runner<br/>python -m evals.run"]
-        E --> P
-        E --> G2
-        E --> T["Score table and JSON<br/>per model and digest"]
-        T --> CI["CI gate<br/>fails the build if a<br/>score drops"]
-    end
-```
-
-The guardrails sit on both sides of the model and are plain code, so they behave the same on every model. In the review, the rules feed the same supervisor as the model reviewers. The evals score one reviewer, three specialists, and three specialists plus the rules separately, which shows how much each part catches.
-
-What happens when a therapist reviews a note:
-
-```mermaid
-sequenceDiagram
-    participant U as Therapist
-    participant A as API
-    participant G as Review graph
-    participant L as LLM
-    participant D as Postgres
-    participant S as Slack
-    U->>A: Review the text on screen
-    A->>G: Start a review
-    par Grounding reviewer
-        G->>L: Facts against the rough session notes
-    and Safety reviewer
-        G->>L: Risk of harm is documented
-    and Billing reviewer
-        G->>L: Each section can support a claim
-    end
-    G->>G: Supervisor merges findings and adds the rule based checks
-    G->>L: Propose fixes for flagged sections
-    G->>D: Save a checkpoint and pause
-    A-->>U: Findings and proposed fixes
-    U->>A: Use a fix, keep the text, or rewrite each section
-    A->>G: Resume with the answers
-    G->>L: Run the three reviewers again, up to two rounds
-    A-->>U: Ready, or needs attention
-    A->>S: Message if problems are still open
-    Note over U,D: The review never saves the note. The therapist saves.
-```
-
-What happens when a note is signed:
-
-```mermaid
-sequenceDiagram
-    participant U as Therapist
-    participant A as API
-    participant D as Postgres
-    participant T as Temporal
-    participant W as Workers
-    U->>A: Sign note with an idempotency key
-    A->>D: Lock note, add audit event, add pending claim
-    A->>T: Start the note signed workflow
-    A-->>U: Signed
-    T->>W: prepare claim
-    W->>D: Claim created
-    T->>W: submit claim on the payer queue
-    W->>D: Claim submitted, audit event written
-    U->>A: Poll claim status
-```
+More diagrams (the AI layer, the review sequence, and the signing sequence) are in [docs/ai-layer.md](docs/ai-layer.md).
 
 ## Tech stack
 
@@ -174,7 +103,7 @@ sequenceDiagram
 * Backend: Python 3, FastAPI, SQLAlchemy, Pydantic
 * Storage: Postgres, Redis
 * Workflows: Temporal with the Python SDK for claims, and LangGraph with a Postgres checkpointer for the pre sign review
-* AI: an LLM behind a provider interface (local Ollama, Anthropic, or a deterministic stub for tests), LangGraph for the review loop, LangSmith for optional tracing
+* AI: an LLM behind a provider interface (local Ollama, or a deterministic stub for tests), LangGraph for the review loop, LangSmith for optional tracing
 * Local setup: Docker Compose
 
 ## Why I built this
@@ -187,161 +116,16 @@ I also wanted to learn LangGraph by using it where it fits. Checking a note befo
 
 I also wanted to build the whole stack myself, with the schema at one end and the browser screen at the other, plus a background job behind it. My day job is in claims and payments, so the part after signing is modeled on that world: a claim that can fail and be retried, and failed claims that can be resubmitted in bulk. A Slack channel shows how the system is doing, because a claim that fails quietly is worse than one that fails loudly.
 
-## Design decisions
+## Documentation
 
-* The human always signs. The AI drafts and suggests, but nothing is applied or final until a therapist accepts it or signs. The AI draft is stored separately and never changed, so comparing it with the signed text shows how much people had to fix.
-* Guardrails are code, not prompts. A prompt asking the model not to invent drugs is a request, and a rule that checks the output is a guarantee about what gets flagged. They run on every model, so swapping Ollama for Claude does not change what is caught.
-* Model output is validated with Pydantic reply models (`app/replies.py`). Each kind of reply, such as a SOAP note, a list of findings, wording suggestions, or fixes, is a typed model, so the shape is written once and the error says exactly what is wrong. A reply that fails gets one retry and then a 502. Each rejection is logged with where and what kind of problem it was, and never the reply itself, because the reply can contain note text. Both LLM calls sit behind a provider interface with a stub, so tests are repeatable and the app runs with no API key.
-* Temporal runs the work after signing, because the steps can fail partway. It gives durable state, retries with backoff, and a history of every attempt. Activities are idempotent, and the workflow ID comes from the note, so one note cannot start two workflows. The cost is more concepts and one more service than Celery.
-* The pending claim is written in the same transaction as the signature. If Temporal is down, the claim stays visibly pending and the follow up work is not lost.
-* Batch resubmit uses one child workflow per claim, processed in chunks with an id cursor, and the parent restarts itself with `continue_as_new` to keep its history small. Payer calls run on their own rate limited queue, so one limit covers a single claim and a batch of thousands.
-* The pre sign review is a LangGraph workflow, not a free running agent. The steps are fixed: three reviewers in parallel, the supervisor, propose fixes, pause for the therapist, then all three again, for up to two rounds. State is saved in Postgres, so a paused review survives an API restart. It returns proposed text and never edits the saved note.
-* Three narrow reviewers instead of one broad one. Each has a short prompt and may only raise its own kinds of finding, and anything outside its role is dropped. A narrow prompt is easier to test and to improve, and the evals compare one reviewer with three so the split has to earn its cost. It costs three model calls per round instead of one.
-* The supervisor is code, not a model. It merges findings from the reviewers and the rule based checks, credits every source on a duplicate, puts safety first, and keeps dismissed problems dismissed. Plain code gives the same answer every time and is simple to test. If one reviewer fails, the whole review fails with a 502 and does not skip it, because a skipped safety review that looks like a pass is worse than an error.
-* LangGraph and Temporal do different jobs. LangGraph controls an LLM step that has to wait for a person. Temporal runs the business process after signing. Each is weak where the other is strong, so I kept them apart.
-* Slack is for the people running the system. Messages carry ids, statuses, and counts, never patient names or note text. Failures and batch results are posted and successes are not, so a batch of 10,000 does not flood the channel. A failed Slack call is retried and then dropped, so it cannot fail a claim.
-* Alerts are rules on numbers I already collect, and they fire once per problem. A model that fails all day sends one message, not one per request. The check runs after the response and never raises, so a broken Slack setting cannot turn a working request into an error.
-* Redis rate limits the LLM endpoints and stores idempotency keys for signing. It fails open, because the database still blocks a double sign.
+* [AI layer and workflows](docs/ai-layer.md): guardrails and validation path, review and signing sequences
+* [Design decisions](docs/design-decisions.md): why it is built this way
+* [Guardrails](docs/guardrails.md): grounding, safety mention, prompt injection, input limits
+* [Cost, tracing and monitoring](docs/observability.md): metrics, alerts, LangSmith, edit rate, admin page, Slack
 
 
-### Adjudication service mode
 
-`PAYER_MODE=simulated` (the default) keeps the built in fake payer. `PAYER_MODE=adjudication` hands each signed note's claim to the Claims Feedback Loop API and tracks the decision. An unknown mode, or adjudication without a URL or org id, stops the API and the worker at startup.
-
-| Variable | Meaning |
-| --- | --- |
-| `PAYER_MODE` | `simulated` or `adjudication` |
-| `CLAIMS_API_URL` | Base URL of the Claims API (required in adjudication mode) |
-| `CLAIMS_ORG_ID` | Tenant id, sent as `org_id` and as the `X-Org-Id` header (required) |
-| `CLAIMS_HTTP_TIMEOUT_SECONDS` | Per request timeout, default 10 |
-| `CLAIMS_POLL_INTERVAL_SECONDS` | Wait between status checks, default 30 |
-| `CLAIMS_POLL_MAX_WAIT_SECONDS` | Longest total wait for a decision, default 3600 |
-| `CLAIM_RATE_PER_HOUR` | Hourly rate, default 180. A claim's `amount` is this times the session's `duration_minutes` (default 50, so 150.00) |
-
-To turn it on, put the variables in `.env` and restart the api and worker (both read `.env`):
-
-```
-PAYER_MODE=adjudication
-CLAIMS_API_URL=https://claims.example.com
-CLAIMS_ORG_ID=your-org-id
-CLAIMS_POLL_INTERVAL_SECONDS=30
-```
-
-**Contract.**
-* `POST {CLAIMS_API_URL}/claims` with `X-Org-Id` and `{org_id, external_ref, claimant_name, amount, history_notes}`. `org_id` and the header must match, or the API returns 403. 201 (created) and 200 (already existed) both count as success. `external_ref` is the note id, so a retried activity returns the same claim and never creates a duplicate. The returned id is stored as `remote_claim_id`.
-* `GET {CLAIMS_API_URL}/claims/{id}` returns `open`, `under_review`, `approved`, or `denied`. The last two are final.
-* 5xx responses and timeouts are retried with the normal retry policy. Any other 4xx fails the claim without retrying.
-* The call runs on the rate limited payer queue, like the simulated one.
-
-**Privacy rule.** The request carries no note text, no session notes, and no patient name. `claimant_name` is an opaque reference (a hash of the org id and the patient id), `history_notes` is built from the session length and the submission attempt only, such as "Outpatient session claim, 50 minutes" (no dates, because a date of service is an identifier), and the payload builder only receives ids and the amount. A test checks the outgoing request for note content, session notes, and the patient's name.
-
-**Resubmitting.** A failed claim is sent again with the same `external_ref` (the note id), so it cannot become a duplicate. A denied claim is sent with a new one, `<note_id>-<attempt>`, because the API returns a repeated reference unchanged and would hand back the denial. The attempt number is stored on the claim, and the new claim is tracked to a decision like the first. The signed note is never reopened.
-
-**Tracking the decision.** After submit, the workflow checks the status, sleeps with `workflow.sleep`, and checks again until the decision is final or the maximum wait passes. Every change of remote status is written to the audit trail. `approved` and `denied` become claim statuses. A timeout, or a status check that keeps failing, moves the claim to `manual_follow_up` and does not fail the workflow. Slack gets a message for a denied claim and for a follow up, with ids and statuses only. The step is behind `workflow.patched("claim-decision-tracking")`, so workflows already running keep their old history.
-
-### Try the batch resubmit
-
-1. In `.env`, set `SIMULATE_PAYER_FAILURES=0` so submissions succeed.
-2. Create synthetic failed claims: `docker compose exec api python -m app.demo_batch 200`
-3. Start the batch: `curl -X POST localhost:8000/claims/resubmit-failed`
-4. Watch progress with `curl localhost:8000/claims/summary`, and open the Temporal UI to see the parent workflow and its child workflows.
-
-Set `SIMULATE_PAYER_FAILURES` to a higher number to watch retries, or `PAYER_MAX_PER_SECOND` to a low number to watch the rate limit.
-
-### Guardrails
-
-Rule based checks run on every AI draft and every review, whatever model wrote the text (`backend/app/guardrails.py`):
-
-* **Grounding.** A diagnosis, medication, dose, or quote that appears in the note but not in the session notes is flagged. Drafts show a warning banner, and the review raises the same finding even when the model reviewer misses it.
-* **Safety mention.** If the session notes mention risk of harm and the note never does, it is flagged.
-* **Prompt injection.** Session notes are untrusted text. They sit inside tags the prompt marks as data, text that tries to close those tags is neutralized, and instruction like phrases such as "ignore previous instructions" raise a warning.
-* **Input limits.** Notes are 20 to 8000 characters, and control characters are removed.
-
-The audit log records the section and kind of each flag and never the message text. These checks are plain rules and catch common failures. They are not a clinical safety control, and a therapist still reviews and signs every note.
-
-### Evals
-
-The evals score a model on synthetic cases. Every note in `backend/evals/cases.py` is invented.
-
-```
-cd backend
-python -m evals.run --provider stub
-python -m evals.run --provider ollama --models llama3.2:3b,llama3.1:8b,qwen2.5:7b
-```
-
-In Docker, run the same command with `docker compose exec api` in front of it.
-
-* **Draft checks (12 cases).** The reply is valid JSON, it invents no diagnosis, drug, dose, or quote, it keeps the key facts, it fills the plan when the notes give one, it keeps a mention of risk of harm, and it does not obey an instruction hidden in the notes.
-* **Review checks (18 cases).** Twelve notes with planted problems (13 problems in all) should be caught, and six clean notes should not be flagged. Each model is scored three ways: one all purpose reviewer, the three specialists, and the three specialists plus the rules. That shows whether the split helps and how much the rules add.
-* **Fix checks (8 cases).** The fixer is scored on notes where the problems are already known. A fix should resolve the problem, leave the note grounded, keep the useful content instead of deleting it, and leave a section alone when the session notes give no way to fix it.
-* **Reproducible.** Temperature is 0, and each result file records the provider, the model, the Ollama model digest, and the date. Results are saved in `backend/evals/results/`.
-* **The harness is tested too.** `tests/test_evals.py` feeds it scripted models that invent drugs, obey the injected instruction, and drop the safety mention, and confirms each one is scored as a failure.
-
-`python -m evals.gate` checks the scores against the floors in `backend/evals/thresholds.json` and exits with an error if any floor is missed. CI runs it on the stub, which is deterministic. It catches a change that breaks the rules, the parsers, the graph, or the scoring. It does not test a real model's prompts, so a run on a real model is a separate step: save the results and check them with `python -m evals.gate --results <file> --thresholds <your file>`.
-
-The stub provider is a baseline. It copies the notes and fills in nothing else, so it scores 0 of 10 on completeness, which is the intended result. Its one reviewer and its three specialists use the same rules, so they score the same. The gap between one reviewer and three only shows up with a real model. The cases are small. Scores say how a model compares on this set. They do not say a model is clinically safe.
-
-### CI
-
-`.github/workflows/ci.yml` runs on every push. It has three jobs: the backend tests and the eval gate, the web type check, lint and production build, and a check that `docker-compose.yml` is valid. The Temporal workflow tests download a test server, so on a CI runner they run instead of skipping.
-
-### Cost, latency, and alerts
-
-Every model call is timed and counted in one place, whichever provider made it. Each call records the provider, the model, what it was for (draft, review by a specific reviewer, fixes), the seconds it took, the tokens the provider reported, and an estimated cost.
-
-* **`GET /metrics`** serves these in Prometheus format: calls by outcome, tokens, estimated cost, a latency histogram, replies rejected by validation, and findings raised by the guardrails. It holds counts and labels only, never note text. There is no login on this API, so keep the path private.
-* **Slack alerts** fire from the same numbers, once per problem and not once per call: a daily budget in dollars or tokens, a run of failed calls in a row, and slow calls with a cooldown. Each is off at 0. Messages carry counts, seconds, and the model name. They are sent after the response, including when the request failed, and a bad Slack setting never breaks a request.
-* **Prices are yours to set.** `LLM_PRICE_INPUT_PER_MTOK` and `LLM_PRICE_OUTPUT_PER_MTOK` are dollars per million tokens and default to 0, because local models are free and prices change. The token budget works with free models.
-* **Evals report it too.** The last table of `python -m evals.run` shows calls, tokens, estimated cost, and p50 and p95 seconds per model, so one reviewer and three specialists can be compared on cost as well as quality. Pass `--price-in` and `--price-out` to price a run.
-* **Sample alert rules** for Prometheus are in `ops/prometheus-alerts.yml`.
-
-LangSmith and `/metrics` do different jobs. LangSmith shows one run in detail. `/metrics` shows the totals over time and drives the alerts.
-
-### Edit rate: how much the therapist changes the draft
-
-The draft is saved once and never changed, and the therapist works on a separate copy, so the two can be compared at any time. NoteLoop turns that into a number: the share of words that were added, removed, or replaced, measured against the longer of the two texts. 0% means the draft was signed as written. 100% means none of it survived.
-
-* **On each note.** The API returns `edit_rate` and a rate for each SOAP section, and the signed banner shows it. The audit row for the signature stores the same numbers and no text.
-* **Across notes.** `GET /stats/edits` rolls up signed notes: the mean and median rate, the share signed unchanged, and the mean for each section. Add `?therapist_id=` to filter. A section that is always rewritten points at a prompt or model problem in that section.
-* **Over time.** `/metrics` has `noteloop_note_edit_rate` and `noteloop_section_edit_rate` histograms, so a model or prompt change can be compared before and after.
-* **What it does not tell you.** A low rate can mean a good draft or a therapist who signs without reading, which is what the review step and the guardrails are for. A high rate can mean a poor draft or a therapist who prefers their own wording. Read it next to the eval scores, not instead of them. With synthetic data the numbers only show that the plumbing works, not how good the drafts are.
-
-### Admin page
-
-`/admin` in the web app shows how the review is behaving across all notes. It has no login, like the rest of the app, so keep it private in any real deployment. It reads `GET /admin/overview`, which works everything out from the audit trail, the claims table, the model call counters, and saved eval results, so it needs no extra storage. Counts and labels only. No note text.
-
-* **Safety net.** Reviews run, notes signed without any review, and notes signed while the review still had open problems. Signing does not require a review today, and the first two numbers show how often that happens.
-* **Reviewers.** For the grounding, safety, and billing reviewers and the rules, how many problems each raised, how many were merged with another reviewer's by the supervisor, and what the therapist did with them. A reviewer whose findings are mostly kept as written is probably noisy. Decisions are recorded per section, so each finding in a section is credited with the decision.
-* **Edits, claims, and model calls.** The edit rate by section, the claim pipeline counts, and calls, tokens, cost, and p50 and p95 seconds by purpose since the API started.
-* **Evals.** The latest saved run for each model, read from `backend/evals/results`. It stays empty on a server that has never run the evals.
-
-### Tracing with LangSmith
-
-LangSmith shows each review run as a trace: every graph node, every model call, how long each took, and where one failed. It is off by default. To turn it on, set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in `.env`.
-
-LangSmith is a hosted service, so the app hides inputs and outputs unless you change `LANGSMITH_HIDE_INPUTS` and `LANGSMITH_HIDE_OUTPUTS`. With the defaults it receives run names, timings, and errors, and no note text. Only turn the hide flags off with synthetic notes. A self-hosted option such as Langfuse or Phoenix would be the next step for real data.
-
-### Slack monitoring
-
-Slack is a monitoring channel for whoever runs the system. It is not part of the therapist's screen.
-
-1. In Slack, create an app, turn on Incoming Webhooks, and add a webhook to a channel.
-2. Put the URL in `.env` as `SLACK_WEBHOOK_URL=...` and restart the api and worker. Treat the URL as a secret. With no URL set, nothing is sent.
-3. Create the daily summary schedule once: `docker compose exec worker python -m app.schedules`
-
-Messages are sent for a claim that fails after all its retries, a batch resubmit starting and finishing (with counts), a review that ends with open findings, a claim denied by the adjudication service, a claim moved to manual follow up, and a daily summary of claims by status. A successful claim sends nothing by default, so a batch of 10,000 does not flood the channel. Set `SLACK_NOTIFY_CLAIM_EVENTS=true` to also get "Claim submitted" when a signed note's claim is submitted and "Claim approved" when the adjudication service approves it (ids and statuses only). Both steps are behind `workflow.patched`. Each Temporal message links to its workflow in the Temporal UI.
-
-A message never contains a patient name or any note text. Only ids, statuses, and counts. A failed Slack call is retried a few times and then dropped. It never fails a claim, a batch, or a review.
-
-## Tests
-
-```bash
-cd backend
-pip install -r requirements.txt
-pytest
-```
-
-The suite covers the note flow, adjudication mode against a mocked Claims API (no network), validation and retry of model output, wording suggestions, every branch of the review graph and its API, rate limiting, idempotent signing, Slack messages, the Temporal activities, and the batch endpoints. The end to end workflow tests need a Temporal test server. They skip when the SDK cannot download one. To run them against a local Temporal CLI, set `TEMPORAL_DEV_SERVER_PATH` to the `temporal` binary.
+The suite covers the note flow, validation and retry of model output, wording suggestions, every branch of the review graph and its API, rate limiting, idempotent signing, Slack messages, the Temporal activities, and the batch endpoints. The end to end workflow tests need a Temporal test server.
 
 ## Responsible AI and PHI
 
