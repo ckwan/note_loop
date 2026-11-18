@@ -2,24 +2,22 @@
 
 NoteLoop uses an LLM to turn a therapist's rough, unstructured session notes into a structured SOAP note (Subjective, Objective, Assessment, Plan). The therapist reviews, edits, and signs the draft. A review step checks the note before signing, and signing starts a background workflow that submits an insurance claim.
 
-Status: portfolio project. Demo video: [link]. All data in this repo is synthetic, and the payer is simulated.
-
 ## What it does
 
 The core step is turning free text into a structured note. For example, rough notes like this (a synthetic case from the evals):
 
-> Client's mother died in March. Crying through the session and not eating well. Discussed a grief support group. Plan is a referral and weekly sessions.
+> Client takes sertraline 50 mg and says it helps a little. Sleep still poor. Was calm and engaged. Plan is to ask the psychiatrist about the dose and keep weekly sessions.
 
 become a SOAP note like this (an illustrative reference note, not captured model output):
 
 | Section | Text |
 | --- | --- |
-| Subjective | Client's mother died in March. Client has trouble eating. |
-| Objective | Client cried through most of the session. |
-| Assessment | Grief reaction after her mother's death. |
-| Plan | Refer to a grief support group and continue weekly sessions. |
+| Subjective | Client takes sertraline 50 mg and says it helps a little. Sleep is still poor. |
+| Objective | Client was calm and engaged. |
+| Assessment | Partial benefit from current medication. |
+| Plan | Ask the psychiatrist about the dose. Keep weekly sessions. |
 
-The model's reply is validated against a schema, and guardrails flag anything the notes do not support. The full flow:
+The model's reply is validated against a schema, and guardrails flag anything the notes do not support, such as a changed dose or a drug that was never mentioned. The full flow:
 
 1. A therapist opens a session from the schedule and pastes rough notes.
 2. The API asks an LLM for a SOAP note (Subjective, Objective, Assessment, Plan) and validates the reply against a schema before saving it.
